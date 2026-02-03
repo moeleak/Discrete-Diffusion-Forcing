@@ -19,6 +19,7 @@ from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ["WANDB_MODE"] = "offline"
 
 def get_accelerator(config, global_config):
     # Select experiment path based on config

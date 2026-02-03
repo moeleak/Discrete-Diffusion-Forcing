@@ -2,6 +2,35 @@ import torch
 from utils.util import forward_process_length, shift_logits,forward_process
 import torch.nn.functional as F
 
+
+def compute_confidence_loss(logits, labels):
+    """
+    计算预测正确位置的熵 (Entropy)。
+    logits: [N_masked, Vocab_size] (只包含被Mask位置的logits)
+    labels: [N_masked] (对应位置的真实token id)
+    """
+    if logits.numel() == 0:
+        return torch.tensor(0.0, device=logits.device)
+
+    # 1. 找出预测正确的样本 (Hard Prediction)
+    predicted_tokens = torch.argmax(logits, dim=-1)
+    correct_mask = (predicted_tokens == labels)
+
+    # 如果没有预测对的，直接返回0
+    if correct_mask.sum() == 0:
+        return torch.tensor(0.0, device=logits.device)
+
+    # 2. 只选取预测正确部分的 Logits 计算熵
+    correct_logits = logits[correct_mask] 
+    
+    log_probs = F.log_softmax(correct_logits, dim=-1)
+    probs = torch.exp(log_probs)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+
+    # 3. 返回平均熵
+    return entropy.mean()
+
+
 def compute_loss_by_config(
         input_ids,
         denoiser,
@@ -45,38 +74,58 @@ def compute_loss(
         self_step,
         eos_id,
 ):
+    # --- 硬编码系数区域 ---
+    CONFIDENCE_BETA = 0.4  # 你可以在这里直接修改置信度损失的权重
+    # --------------------
+
     B, L = input_ids.shape
     noisy_batch, masked_indices, p_mask = forward_process_length(input_ids, mask_id=mask_id,prompt_lengths=question_length, block_size=block_size,eos_id=eos_id)
     token_positions = torch.arange(L, device=noisy_batch.device).expand(B, L)
     prompt_mask = (token_positions < question_length.unsqueeze(1))
     noisy_batch[prompt_mask] = input_ids[prompt_mask]
-    # prompt_mask = prompt_mask.to(torch.int64)
+    
     noisy_batch = noisy_batch.to(denoiser.device)
-    attention_mask=build_custom_float_attention_mask(noisy_batch, question_length, block_size, device=noisy_batch.device)
-    attention_mask=attention_mask.to(torch.float16)
-    logits=denoiser(noisy_batch,attention_mask=attention_mask).logits
-    logits=shift_logits(logits)
+    attention_mask = build_custom_float_attention_mask(noisy_batch, question_length, block_size, device=noisy_batch.device)
+    attention_mask = attention_mask.to(torch.float16)
+    
+    logits = denoiser(noisy_batch, attention_mask=attention_mask).logits
+    logits = shift_logits(logits)
+    
+    # 提取被 mask 部分的 logits 和 labels，避免重复索引
+    target_logits = logits[masked_indices]     # [N_masked, Vocab]
+    target_labels = input_ids[masked_indices]  # [N_masked]
+    target_p_mask = p_mask[masked_indices]
+
     if self_align:
         with torch.no_grad():
             with denoiser.disable_adapter():
-                # ref_model = denoiser
-            # ref_model.eval()
-            # print(type(ref_model))
-                # denoiser.eval()
-                ref_logits=denoiser(noisy_batch,attention_mask=torch.zeros([1,1,noisy_batch.shape[1],noisy_batch.shape[1]],dtype=torch.float16,device=denoiser.device)).logits
-                ref_logits=shift_logits(ref_logits)
+                ref_logits = denoiser(noisy_batch, attention_mask=torch.zeros([1,1,noisy_batch.shape[1],noisy_batch.shape[1]],dtype=torch.float16,device=denoiser.device)).logits
+                ref_logits = shift_logits(ref_logits)
                 ref_logits = torch.nn.functional.softmax(ref_logits, dim=-1)
-                # denoiser.train()
-        token_loss_2 = F.cross_entropy(logits[masked_indices], ref_logits[masked_indices], reduction='none') / p_mask[masked_indices]
-        # print("token_loss_2",token_loss_2.shape)
+        # self_align 下依然计算 CE Loss
+        token_loss_2 = F.cross_entropy(target_logits, ref_logits[masked_indices], reduction='none') / target_p_mask
     else:
-        token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none') / p_mask[masked_indices]
-    losses = {
-                # 'loss_1': token_loss_2.mean() * 0,
-                'loss': token_loss_2.mean(),
-            }
+        # 标准 CE Loss
+        token_loss_2 = F.cross_entropy(target_logits, target_labels, reduction='none') / target_p_mask
 
-    return losses 
+    # --- [新增] 计算置信度损失并合并 ---
+    # 无论是否 self_align，置信度通常都是针对真实标签(Hard Label)计算的，以通过 Parallel Decoding
+    conf_loss = compute_confidence_loss(target_logits, target_labels)
+    
+    # 总 Loss = 原始 Loss + 系数 * 置信度 Loss
+    total_loss = token_loss_2.mean() + CONFIDENCE_BETA * conf_loss
+    # print("token_loss_2.mean():",token_loss_2.mean().item())
+    # print("conf_loss:",conf_loss.item())
+
+    losses = {
+        'loss': total_loss,
+        # 'ce_loss': token_loss_2.mean(), # 可选：如果你想监控原始 CE Loss
+        # 'conf_loss': conf_loss          # 可选：如果你想监控置信度 Loss
+    }
+
+    return losses
+
+
 def compute_normal_loss(
         input_ids,
         denoiser,

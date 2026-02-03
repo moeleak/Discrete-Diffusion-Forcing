@@ -3,11 +3,11 @@ training_mode: 'dream'  # 'llada' or 'dream'
 
 # Model and data path configuration
 paths:
-  model: 'Dream-org/Dream-v0-Base-7B'
+  model: '/home/xck/data/models/Dream-v0-Instruct-7B_hug'
   experiment: 'ckpt_dream_base'
   data:
-    bs: 'Lansechen/bs17k_collection_filtered_hard_maxlength600'
-    bs_easy: 'Lansechen/bs17k_collection_filtered_easy_maxlength600'
+    bs: '/home/xck/data/datasets/bs17k_collection_filtered_hard_maxlength600'
+    bs_easy: '/home/xck/data/datasets/bs17k_collection_filtered_easy_maxlength600'
 
 denoiser:
   encoder:
@@ -35,7 +35,7 @@ train:
   global_step:
   exp_name: &exp_name 'ddt_test'
   wandb_proj: *exp_name
-  output_dir: 'ddt_test'
+  output_dir: '/home/xck/data/Discrete-Diffusion-Forcing/maskfirsteos-xiaoyi-confloss04'
   logging_dir: 'logs'
   mixed_precision: 'fp16'
   gradient_accumulation_steps: 5

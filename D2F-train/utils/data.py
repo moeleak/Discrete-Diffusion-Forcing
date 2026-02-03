@@ -139,11 +139,43 @@ def read_llada(file_path="/home/wx/dllm_block/data/merged_bs17k_easy_hard_llada_
             except json.JSONDecodeError:
                 print(f'JSONDecodeError: {line}')
     return data
+
+
+def read_custom_jsonl(config=None):
+    data = []
+    # 建议在 config 中定义这个路径，或者给个默认值
+
+    
+    file_path = "data/xiaoyi_train.jsonl" 
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                # 核心逻辑：将 json 中的 query 映射为 question，answer 保持不变
+                data.append({
+                    "question": item['query'], 
+                    "answer": item['answer']
+                })
+    except FileNotFoundError:
+        print(f"Warning: File {file_path} not found.")
+    except Exception as e:
+        print(f"Error reading jsonl: {e}")
+        
+    return data
+
 def get_bs17k_dataloader(tokenizer, config, max_length=1024):
     train_dataset = []
     # Pass global config to data reading functions
     global_config = getattr(config, '_parent', config)  # Try to get parent config
     data_dict=read_bs(global_config)+read_bs_easy(global_config)
+    new_data = read_custom_jsonl(global_config) # 调用新函数
+    data_dict += new_data # 合并
+    #打印长度
+    print("Data length:",len(data_dict))
+
     for data in data_dict:
         question = data['question']
         answer = data['answer']
