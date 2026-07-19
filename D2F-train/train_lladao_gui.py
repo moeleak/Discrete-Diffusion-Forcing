@@ -36,6 +36,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        help=(
+            "stop and checkpoint at this absolute step while retaining the "
+            "--max-steps optimizer schedule (used by distributed smoke tests)"
+        ),
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         help="step directory containing adapter/ and training_state.pt",
@@ -129,7 +137,14 @@ def main() -> None:
     with args.config.open(encoding="utf-8") as handle:
         raw_config = yaml.safe_load(handle)
     config = as_namespace(raw_config)
-    max_steps = int(args.max_steps or config.train.max_steps)
+    max_steps = int(
+        args.max_steps if args.max_steps is not None else config.train.max_steps
+    )
+    stop_after_step = int(
+        args.stop_after_step if args.stop_after_step is not None else max_steps
+    )
+    if max_steps <= 0 or stop_after_step <= 0 or stop_after_step > max_steps:
+        raise ValueError("steps must satisfy 0 < stop-after-step <= max-steps")
     output_root = Path(config.paths.output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     project_config = ProjectConfiguration(project_dir=str(output_root), logging_dir=str(output_root / "logs"))
@@ -183,13 +198,17 @@ def main() -> None:
         )
         if step >= max_steps:
             raise ValueError(f"resume step {step} must be less than max steps {max_steps}")
+        if step >= stop_after_step:
+            raise ValueError(
+                f"resume step {step} must be less than stop-after-step {stop_after_step}"
+            )
     loader = build_loader(config, tokenizer, special_tokens, accelerator)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     model.train()
 
     iterator = iter(loader)
     log_path = output_root / "train.jsonl"
-    while step < max_steps:
+    while step < stop_after_step:
         try:
             packed = next(iterator)
         except StopIteration:
@@ -217,7 +236,7 @@ def main() -> None:
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
             print(json.dumps(record, sort_keys=True), flush=True)
-        if step % int(config.train.save_every) == 0 or step == max_steps:
+        if step % int(config.train.save_every) == 0 or step == stop_after_step:
             save_checkpoint(accelerator, model, optimizer, scheduler, output_root, step)
 
     accelerator.wait_for_everyone()

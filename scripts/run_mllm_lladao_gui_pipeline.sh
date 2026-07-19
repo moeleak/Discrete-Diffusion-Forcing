@@ -140,7 +140,8 @@ checkpoint="$(latest_checkpoint)"
 if [[ -z "${checkpoint}" ]]; then
   echo "[$(timestamp)] running one-step distributed training smoke test"
   "${ACCELERATE}" launch --num_processes 2 \
-    D2F-train/train_lladao_gui.py --config "${CONFIG}" --max-steps 1
+    D2F-train/train_lladao_gui.py --config "${CONFIG}" \
+    --max-steps "${MAX_STEPS}" --stop-after-step 1
   checkpoint="$(latest_checkpoint)"
 fi
 
