@@ -5,9 +5,19 @@ description = "Discrete Diffusion Forcing (D2F): dLLMs Can Do Faster-Than-AR Inf
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
     "transformers==4.49.0",
     "lm_eval==0.4.8",
     "accelerate==0.34.2",
+    "peft==0.13.2",
+    "safetensors==0.4.5",
+    "omegaconf==2.3.0",
+    "PyYAML==6.0.2",
+    "Pillow>=10.0.0",
+    "numpy==1.26.4",
+    "pyarrow==17.0.0",
+    "einops==0.8.1",
     "antlr4-python3-runtime==4.11",
     "math_verify",
     "sympy",

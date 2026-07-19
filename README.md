@@ -320,6 +320,72 @@ shell eval_llada.sh
 ```
 The results will be saved in the `output_path` specified within the shell scripts.
 
+#### LLaDA-o GUI-grounding backend
+
+This fork also contains a multimodal D2F backend for the LLaDA-o GUI model. It
+keeps the original image and prompt KV cache, applies block-causal attention to
+the answer, and stores the D2F adaptation as a small LoRA checkpoint. It needs
+the companion `LLaDA-o-d2f-support` checkout because upstream LLaDA-o does not
+expose additive attention bias during cached inference.
+
+On the `mllm` runtime host, `scripts/prepare_mllm_lladao_gui_data.sh` rebuilds
+the 7,341-row OCR-aligned training set and the paired 6,055-row Mind2Web test
+set entirely below `/home/ma-user/work/LLaDA-o`. It defaults to eight CPU OCR
+workers so it can run while GPUs are occupied.
+
+```shell
+ROOT=/home/ma-user/work/LLaDA-o
+PYTHON=$ROOT/env/bin/python
+LLADAO=$ROOT/src/LLaDA-o
+MODEL=$ROOT/models/lladao-gui-mind2web-step750
+ADAPTER=$ROOT/runs/d2f-block16-r32/step-0001377/adapter
+
+# One screenshot, with paired baseline/D2F timings.
+$PYTHON D2F-eval/demo_lladao_gui.py \
+  --backend both \
+  --lladao-repo "$LLADAO" \
+  --model-path "$MODEL" \
+  --checkpoint "$MODEL/ema.safetensors" \
+  --adapter "$ADAPTER" \
+  --image /path/to/screenshot.png \
+  --prompt 'Click the Downloads button.'
+```
+
+`eval_lladao_gui.py` emits the same JSONL schema as LLaDA-o's GUI benchmark,
+so its existing scorer can be used for both backends. Run baseline and D2F into
+separate output directories, score each directory with
+`eval/gui_grounding/score_benchmark.py`, then enforce the paired quality and
+latency gates with `D2F-eval/compare_lladao_gui.py`.
+
+```shell
+BENCH=$ROOT/data/bench_ocr
+
+# Add --limit 20 for a quick paired smoke test; omit it for all 6,055 rows.
+$PYTHON D2F-eval/eval_lladao_gui.py \
+  --backend baseline --lladao-repo "$LLADAO" \
+  --model-path "$MODEL" --checkpoint "$MODEL/ema.safetensors" \
+  --benchmark-root "$BENCH" --output-dir "$ROOT/runs/baseline"
+
+$PYTHON D2F-eval/eval_lladao_gui.py \
+  --backend d2f --lladao-repo "$LLADAO" \
+  --model-path "$MODEL" --checkpoint "$MODEL/ema.safetensors" \
+  --adapter "$ADAPTER" --benchmark-root "$BENCH" \
+  --output-dir "$ROOT/runs/d2f"
+
+for BACKEND in baseline d2f; do
+  $PYTHON "$LLADAO/eval/gui_grounding/score_benchmark.py" \
+    --benchmark-root "$BENCH" \
+    --predictions-dir "$ROOT/runs/$BACKEND" \
+    --output-dir "$ROOT/runs/$BACKEND/scores"
+done
+
+$PYTHON D2F-eval/compare_lladao_gui.py \
+  --baseline-predictions "$ROOT/runs/baseline" \
+  --d2f-predictions "$ROOT/runs/d2f" \
+  --baseline-scores "$ROOT/runs/baseline/scores/results.json" \
+  --d2f-scores "$ROOT/runs/d2f/scores/results.json"
+```
+
 > ### ❗️ Important Notice for HumanEval
 > The `HumanEval` benchmark requires a post-processing step to sanitize the generated code and calculate the final `pass@1` score. After the evaluation script finishes, run the following command:
 > ```shell
@@ -339,6 +405,17 @@ Once the configuration is set, you can start the training process by running:
 ```shell
 bash train.sh
 ```
+
+For the LLaDA-o GUI adapter, update the paths in
+`D2F-train/config/lladao_gui.yaml` and launch two data-parallel workers:
+
+```shell
+accelerate launch --num_processes 2 D2F-train/train_lladao_gui.py \
+  --config D2F-train/config/lladao_gui.yaml
+```
+
+The base `ema.safetensors` is never rewritten. Each save directory contains an
+adapter plus `training_state.pt`; only the adapter is needed for inference.
 
 ### 4. Generation Demo
 
