@@ -419,8 +419,11 @@ adapter plus `training_state.pt`; only the adapter is needed for inference.
 
 On `mllm`, the resumable end-to-end launcher waits for both OCR manifests and
 five consecutive idle-GPU checks, verifies the dense checkpoint checksum,
-runs a one-step distributed smoke test, resumes to the configured step budget,
-and finally enforces the paired 100-sample quality/latency gate:
+runs a one-step distributed smoke test, and resumes to the configured step
+budget. It first enforces a paired 100-sample Mind2Web quality/latency gate,
+then runs resumable full-set evaluation on all 6,055 Mind2Web examples and the
+available ScreenSpot-Web text/icon splits. Every full-set split must satisfy
+the same paired quality and latency thresholds.
 
 ```shell
 ROOT=/home/ma-user/work/LLaDA-o

@@ -15,6 +15,7 @@ TRAIN_ROOT="${TRAIN_ROOT:-${ROOT}/data/train_ocr}"
 BENCH_ROOT="${BENCH_ROOT:-${ROOT}/data/bench_ocr}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-block16-r32}"
 SMOKE_LIMIT="${SMOKE_LIMIT:-100}"
+FULL_BENCHMARKS="${FULL_BENCHMARKS:-mind2web,screenspot_web_text,screenspot_web_icon}"
 MAX_STEPS="${MAX_STEPS:-1377}"
 GPU_MEMORY_LIMIT_MIB="${GPU_MEMORY_LIMIT_MIB:-4096}"
 GPU_UTIL_LIMIT_PERCENT="${GPU_UTIL_LIMIT_PERCENT:-10}"
@@ -80,9 +81,19 @@ run_eval() {
   local backend="$1"
   local output="$2"
   local limit="$3"
+  local benchmarks="$4"
+  local reset="$5"
   local adapter_args=()
+  local limit_args=()
+  local resume_args=()
   if [[ "${backend}" == d2f ]]; then
     adapter_args=(--adapter "${OUTPUT_ROOT}/step-$(printf '%07d' "${MAX_STEPS}")/adapter")
+  fi
+  if [[ -n "${limit}" ]]; then
+    limit_args=(--limit "${limit}")
+  fi
+  if [[ "${reset}" == true ]]; then
+    resume_args=(--no-resume)
   fi
   "${TORCHRUN}" --standalone --nproc-per-node=2 \
     "${REPO}/D2F-eval/eval_lladao_gui.py" \
@@ -93,14 +104,27 @@ run_eval() {
     "${adapter_args[@]}" \
     --benchmark-root "${BENCH_ROOT}" \
     --output-dir "${output}" \
-    --limit "${limit}" \
-    --no-resume
+    --benchmarks "${benchmarks}" \
+    "${limit_args[@]}" \
+    "${resume_args[@]}"
   "${PYTHON}" "${LLADAO}/eval/gui_grounding/score_benchmark.py" \
     --benchmark-root "${BENCH_ROOT}" \
     --predictions-dir "${output}" \
     --output-dir "${output}/scores" \
-    --benchmarks mind2web \
-    --limit "${limit}"
+    --benchmarks "${benchmarks}" \
+    "${limit_args[@]}"
+}
+
+run_gate() {
+  local root="$1"
+  local benchmark="$2"
+  "${PYTHON}" D2F-eval/compare_lladao_gui.py \
+    --baseline-predictions "${root}/baseline" \
+    --d2f-predictions "${root}/d2f" \
+    --baseline-scores "${root}/baseline/scores/results.json" \
+    --d2f-scores "${root}/d2f/scores/results.json" \
+    --benchmark "${benchmark}" \
+    --output "${root}/gate-${benchmark}.json"
 }
 
 wait_for_file "${TRAIN_ROOT}/manifest.json"
@@ -130,12 +154,18 @@ fi
 
 smoke_root="${ROOT}/runs/paired-smoke-${SMOKE_LIMIT}"
 echo "[$(timestamp)] running paired ${SMOKE_LIMIT}-sample benchmark"
-run_eval baseline "${smoke_root}/baseline" "${SMOKE_LIMIT}"
-run_eval d2f "${smoke_root}/d2f" "${SMOKE_LIMIT}"
-"${PYTHON}" D2F-eval/compare_lladao_gui.py \
-  --baseline-predictions "${smoke_root}/baseline" \
-  --d2f-predictions "${smoke_root}/d2f" \
-  --baseline-scores "${smoke_root}/baseline/scores/results.json" \
-  --d2f-scores "${smoke_root}/d2f/scores/results.json" \
-  --output "${smoke_root}/gate.json"
+run_eval baseline "${smoke_root}/baseline" "${SMOKE_LIMIT}" mind2web true
+run_eval d2f "${smoke_root}/d2f" "${SMOKE_LIMIT}" mind2web true
+run_gate "${smoke_root}" mind2web
 echo "[$(timestamp)] paired smoke gate passed"
+
+full_root="${ROOT}/runs/paired-full"
+echo "[$(timestamp)] running resumable full benchmark: ${FULL_BENCHMARKS}"
+run_eval baseline "${full_root}/baseline" "" "${FULL_BENCHMARKS}" false
+run_eval d2f "${full_root}/d2f" "" "${FULL_BENCHMARKS}" false
+IFS=',' read -ra full_benchmarks <<<"${FULL_BENCHMARKS}"
+for benchmark in "${full_benchmarks[@]}"; do
+  benchmark="${benchmark//[[:space:]]/}"
+  [[ -n "${benchmark}" ]] && run_gate "${full_root}" "${benchmark}"
+done
+echo "[$(timestamp)] all full paired gates passed"
