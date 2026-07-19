@@ -417,6 +417,18 @@ accelerate launch --num_processes 2 D2F-train/train_lladao_gui.py \
 The base `ema.safetensors` is never rewritten. Each save directory contains an
 adapter plus `training_state.pt`; only the adapter is needed for inference.
 
+On `mllm`, the resumable end-to-end launcher waits for both OCR manifests and
+five consecutive idle-GPU checks, verifies the dense checkpoint checksum,
+runs a one-step distributed smoke test, resumes to the configured step budget,
+and finally enforces the paired 100-sample quality/latency gate:
+
+```shell
+ROOT=/home/ma-user/work/LLaDA-o
+nohup env LLADAO_WORK_ROOT="$ROOT" \
+  bash "$ROOT/src/Discrete-Diffusion-Forcing/scripts/run_mllm_lladao_gui_pipeline.sh" \
+  >"$ROOT/logs/d2f-pipeline.log" 2>&1 < /dev/null &
+```
+
 ### 4. Generation Demo
 
 We provide simple scripts to demonstrate the generation process and compare D2F with a standard AR baseline.
