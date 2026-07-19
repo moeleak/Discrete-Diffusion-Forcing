@@ -83,7 +83,9 @@ run_eval() {
   local limit="$3"
   local benchmarks="$4"
   local reset="$5"
+  shift 5
   local adapter_args=()
+  local inference_args=("$@")
   local limit_args=()
   local resume_args=()
   if [[ "${backend}" == d2f ]]; then
@@ -106,7 +108,8 @@ run_eval() {
     --output-dir "${output}" \
     --benchmarks "${benchmarks}" \
     "${limit_args[@]}" \
-    "${resume_args[@]}"
+    "${resume_args[@]}" \
+    "${inference_args[@]}"
   "${PYTHON}" "${LLADAO}/eval/gui_grounding/score_benchmark.py" \
     --benchmark-root "${BENCH_ROOT}" \
     --predictions-dir "${output}" \
@@ -116,15 +119,17 @@ run_eval() {
 }
 
 run_gate() {
-  local root="$1"
-  local benchmark="$2"
+  local baseline="$1"
+  local d2f="$2"
+  local benchmark="$3"
+  local output="$4"
   "${PYTHON}" D2F-eval/compare_lladao_gui.py \
-    --baseline-predictions "${root}/baseline" \
-    --d2f-predictions "${root}/d2f" \
-    --baseline-scores "${root}/baseline/scores/results.json" \
-    --d2f-scores "${root}/d2f/scores/results.json" \
+    --baseline-predictions "${baseline}" \
+    --d2f-predictions "${d2f}" \
+    --baseline-scores "${baseline}/scores/results.json" \
+    --d2f-scores "${d2f}/scores/results.json" \
     --benchmark "${benchmark}" \
-    --output "${root}/gate-${benchmark}.json"
+    --output "${output}"
 }
 
 wait_for_file "${TRAIN_ROOT}/manifest.json"
@@ -155,18 +160,68 @@ fi
 
 smoke_root="${ROOT}/runs/paired-smoke-${SMOKE_LIMIT}"
 echo "[$(timestamp)] running paired ${SMOKE_LIMIT}-sample benchmark"
-run_eval baseline "${smoke_root}/baseline" "${SMOKE_LIMIT}" mind2web true
-run_eval d2f "${smoke_root}/d2f" "${SMOKE_LIMIT}" mind2web true
-run_gate "${smoke_root}" mind2web
-echo "[$(timestamp)] paired smoke gate passed"
+smoke_baseline="${smoke_root}/baseline"
+run_eval baseline "${smoke_baseline}" "${SMOKE_LIMIT}" mind2web true
+candidate_specs=(
+  "fast 0.10 0.95 0.90"
+  "balanced 0.25 0.95 0.95"
+  "official 0.50 0.90 1.00"
+  "quality 0.50 1.00 1.00"
+)
+selected_name=""
+selected_args=()
+for spec in "${candidate_specs[@]}"; do
+  read -r name block_add decoded skip <<<"${spec}"
+  candidate_output="${smoke_root}/d2f-${name}"
+  echo "[$(timestamp)] trying D2F decode candidate ${name}: ${block_add}/${decoded}/${skip}"
+  if run_eval d2f "${candidate_output}" "${SMOKE_LIMIT}" mind2web true \
+      --block-add-threshold "${block_add}" \
+      --decoded-token-threshold "${decoded}" \
+      --skip-threshold "${skip}" \
+    && run_gate \
+      "${smoke_baseline}" "${candidate_output}" mind2web \
+      "${smoke_root}/gate-${name}.json"; then
+    selected_name="${name}"
+    selected_args=(
+      --block-add-threshold "${block_add}"
+      --decoded-token-threshold "${decoded}"
+      --skip-threshold "${skip}"
+    )
+    break
+  fi
+done
+if [[ -z "${selected_name}" ]]; then
+  echo "[$(timestamp)] no D2F decode candidate passed the paired smoke gate" >&2
+  exit 1
+fi
+"${PYTHON}" - \
+  "${smoke_root}/selected-decode.json" "${selected_name}" \
+  "${selected_args[1]}" "${selected_args[3]}" "${selected_args[5]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, name, block_add, decoded, skip = sys.argv[1:]
+value = {
+    "name": name,
+    "block_add_threshold": float(block_add),
+    "decoded_token_threshold": float(decoded),
+    "skip_threshold": float(skip),
+}
+Path(path).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+PY
+echo "[$(timestamp)] paired smoke gate passed with ${selected_name}"
 
 full_root="${ROOT}/runs/paired-full"
 echo "[$(timestamp)] running resumable full benchmark: ${FULL_BENCHMARKS}"
 run_eval baseline "${full_root}/baseline" "" "${FULL_BENCHMARKS}" false
-run_eval d2f "${full_root}/d2f" "" "${FULL_BENCHMARKS}" false
+full_d2f="${full_root}/d2f-${selected_name}"
+run_eval d2f "${full_d2f}" "" "${FULL_BENCHMARKS}" false "${selected_args[@]}"
 IFS=',' read -ra full_benchmarks <<<"${FULL_BENCHMARKS}"
 for benchmark in "${full_benchmarks[@]}"; do
   benchmark="${benchmark//[[:space:]]/}"
-  [[ -n "${benchmark}" ]] && run_gate "${full_root}" "${benchmark}"
+  [[ -n "${benchmark}" ]] && run_gate \
+    "${full_root}/baseline" "${full_d2f}" "${benchmark}" \
+    "${full_root}/gate-${benchmark}-${selected_name}.json"
 done
 echo "[$(timestamp)] all full paired gates passed"
