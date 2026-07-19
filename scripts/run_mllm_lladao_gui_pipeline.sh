@@ -132,8 +132,41 @@ run_gate() {
     --output "${output}"
 }
 
+validate_prepared_data() {
+  "${PYTHON}" - "${TRAIN_ROOT}/manifest.json" "${BENCH_ROOT}/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+train = json.loads(Path(sys.argv[1]).read_text())
+benchmark = json.loads(Path(sys.argv[2]).read_text())
+train_ocr = train["mind2web_ocr_realignment"]
+benchmark_ocr = benchmark["ocr_target_realignment"]
+checks = {
+    "training rows": (int(train_ocr["rows"]), 7341),
+    "training OCR errors": (int(train_ocr["processing_errors"]), 0),
+    "benchmark rows": (int(benchmark_ocr["samples"]), 6055),
+    "benchmark OCR errors": (
+        int(benchmark_ocr.get("counters", {}).get("mind2web:ocr_error", 0)),
+        0,
+    ),
+    "benchmark manifest rows": (
+        int(benchmark["benchmarks"]["mind2web"]["rows"]),
+        6055,
+    ),
+}
+failed = {name: value for name, value in checks.items() if value[0] != value[1]}
+if failed:
+    raise SystemExit(f"prepared data validation failed: {failed}")
+print("prepared data validation passed: " + ", ".join(
+    f"{name}={actual}" for name, (actual, _) in checks.items()
+))
+PY
+}
+
 wait_for_file "${TRAIN_ROOT}/manifest.json"
 wait_for_file "${BENCH_ROOT}/manifest.json"
+validate_prepared_data
 echo "7d7796a27cfc81b85c3711873799aefd99c16951b15fbfcc3f56954bef9bbb23  ${MODEL}/ema.safetensors" \
   | sha256sum --check --status
 wait_for_idle_gpus
