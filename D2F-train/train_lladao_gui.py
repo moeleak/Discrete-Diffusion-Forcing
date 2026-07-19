@@ -8,12 +8,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import yaml
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
-from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from transformers import get_cosine_schedule_with_warmup
 
@@ -21,6 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from lladao_d2f.modeling import LLaDAOGuiD2FModel, add_lladao_repo, add_lora, load_base_model
+
+
+def as_namespace(value):
+    if isinstance(value, dict):
+        return SimpleNamespace(**{key: as_namespace(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return [as_namespace(item) for item in value]
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,7 +126,9 @@ def restore_checkpoint(peft_model, optimizer, scheduler, checkpoint: Path) -> in
 
 def main() -> None:
     args = parse_args()
-    config = OmegaConf.load(args.config)
+    with args.config.open(encoding="utf-8") as handle:
+        raw_config = yaml.safe_load(handle)
+    config = as_namespace(raw_config)
     max_steps = int(args.max_steps or config.train.max_steps)
     output_root = Path(config.paths.output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -132,7 +142,8 @@ def main() -> None:
     )
     set_seed(int(config.seed) + accelerator.process_index)
     if accelerator.is_main_process:
-        OmegaConf.save(config, output_root / "resolved-config.yaml")
+        with (output_root / "resolved-config.yaml").open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(raw_config, handle, sort_keys=False)
 
     base, tokenizer, special_tokens = load_base_model(
         config.paths.lladao_repo,

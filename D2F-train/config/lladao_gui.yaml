@@ -18,6 +18,8 @@ lora:
   dropout: 0.1
 
 train:
+  # Initial D2F adaptation budget: 7,341 rows * 3 passes / global batch 16.
+  # Extend with --max-steps only if the held-out paired gate still improves.
   max_steps: 1377
   gradient_accumulation_steps: 8
   lr: 1.0e-5
