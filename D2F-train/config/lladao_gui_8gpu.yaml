@@ -1,0 +1,43 @@
+seed: 42
+
+paths:
+  lladao_repo: /home/ma-user/work/LLaDA-o/src/LLaDA-o
+  model_path: /home/ma-user/work/LLaDA-o/models/lladao-gui-mind2web-step750
+  checkpoint: /home/ma-user/work/LLaDA-o/models/lladao-gui-mind2web-step750/ema.safetensors
+  train_data: /home/ma-user/work/LLaDA-o/data/train_ocr/mind2web
+  dataset_config: /home/ma-user/work/LLaDA-o/src/LLaDA-o/data/configs/gui_grounding_table1.yaml
+  output_dir: /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32-8gpu
+
+model:
+  mask_id: 126336
+  block_size: 16
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.1
+
+train:
+  # 8 ranks * batch size 1 * 2 accumulation steps = global batch 16.
+  # This preserves the 2-GPU recipe's three-pass, 1,377-step budget.
+  max_steps: 1377
+  gradient_accumulation_steps: 2
+  lr: 1.0e-5
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.05
+  warmup_ratio: 0.03
+  distill_weight: 1.0
+  hard_ce_weight: 0.1
+  max_grad_norm: 1.0
+  log_every: 10
+  save_every: 100
+
+data:
+  num_workers: 1
+  prefetch_factor: 2
+  expected_num_tokens: 6144
+  max_num_tokens: 8192
+  max_num_tokens_per_sample: 8192
+  prefer_buffer_before: 6144
+  max_buffer_size: 50
