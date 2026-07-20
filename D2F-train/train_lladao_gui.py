@@ -16,6 +16,7 @@ import yaml
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -218,36 +219,57 @@ def main() -> None:
 
     iterator = iter(loader)
     log_path = output_root / "train.jsonl"
-    while step < stop_after_step:
-        try:
-            packed = next(iterator)
-        except StopIteration:
-            iterator = iter(loader)
-            packed = next(iterator)
-        batch = packed.cuda(accelerator.device).to_dict()
-        batch.pop("batch_data_indexes", None)
-        with accelerator.accumulate(model):
-            metrics = model(batch)
-            accelerator.backward(metrics["loss"])
-            if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(trainable, float(config.train.max_grad_norm))
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-        if not accelerator.sync_gradients:
-            continue
-        step += 1
-        reduced = {
-            key: accelerator.gather(value.detach().reshape(1)).float().mean().item()
-            for key, value in metrics.items()
-        }
-        if accelerator.is_main_process and (step == 1 or step % int(config.train.log_every) == 0):
-            record = {"step": step, "lr": scheduler.get_last_lr()[0], **reduced}
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
-            print(json.dumps(record, sort_keys=True), flush=True)
-        if step % int(config.train.save_every) == 0 or step == stop_after_step:
-            save_checkpoint(accelerator, model, optimizer, scheduler, output_root, step)
+    progress = tqdm(
+        total=stop_after_step,
+        initial=step,
+        desc="D2F training",
+        unit="step",
+        dynamic_ncols=True,
+        smoothing=0.1,
+        disable=not accelerator.is_main_process,
+    )
+    try:
+        while step < stop_after_step:
+            try:
+                packed = next(iterator)
+            except StopIteration:
+                iterator = iter(loader)
+                packed = next(iterator)
+            batch = packed.cuda(accelerator.device).to_dict()
+            batch.pop("batch_data_indexes", None)
+            with accelerator.accumulate(model):
+                metrics = model(batch)
+                accelerator.backward(metrics["loss"])
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(trainable, float(config.train.max_grad_norm))
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+            if not accelerator.sync_gradients:
+                continue
+            step += 1
+            reduced = {
+                key: accelerator.gather(value.detach().reshape(1)).float().mean().item()
+                for key, value in metrics.items()
+            }
+            current_lr = scheduler.get_last_lr()[0]
+            if accelerator.is_main_process:
+                progress.set_postfix(
+                    loss=f"{reduced['loss']:.4f}",
+                    lr=f"{current_lr:.2e}",
+                    masked=f"{reduced['masked_tokens']:.1f}",
+                    refresh=False,
+                )
+                progress.update(1)
+                if step == 1 or step % int(config.train.log_every) == 0:
+                    record = {"step": step, "lr": current_lr, **reduced}
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, sort_keys=True) + "\n")
+                    progress.write(json.dumps(record, sort_keys=True))
+            if step % int(config.train.save_every) == 0 or step == stop_after_step:
+                save_checkpoint(accelerator, model, optimizer, scheduler, output_root, step)
+    finally:
+        progress.close()
 
     accelerator.wait_for_everyone()
 

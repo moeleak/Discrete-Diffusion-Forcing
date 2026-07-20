@@ -22,5 +22,6 @@ dependencies = [
     "sympy",
     "hf_xet",
     "pydantic==2.10.6",
+    "tqdm>=4.66.0",
     "gradio",
 ]
