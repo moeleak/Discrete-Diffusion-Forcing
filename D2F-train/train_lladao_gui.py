@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+# Keep variable-length packed batches from fragmenting the CUDA allocator.
+# This changes allocation strategy only; model and optimizer precision stay
+# identical to the configured bf16-base/fp32-LoRA training recipe.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch._dynamo
 import yaml

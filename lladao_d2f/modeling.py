@@ -20,6 +20,39 @@ LLM_LORA_PATTERN = (
 )
 
 
+def strip_unused_generation_experts(model) -> int:
+    """Remove visual-generation experts from an understanding-only model.
+
+    LLaDA-o MoT checkpoints contain a second set of attention, MLP, and norm
+    modules whose names end in ``_moe_gen``.  GUI grounding runs exclusively
+    with ``visual_gen=False`` and empty generation-token indexes, so those
+    modules receive only empty tensors during training and are never reached
+    during understanding-mode inference.  Replacing them after strict
+    checkpoint loading preserves the GUI computation exactly while avoiding
+    moving roughly seven billion unused parameters to every GPU.
+    """
+    if getattr(getattr(model, "config", None), "visual_gen", None) is not False:
+        raise ValueError("generation experts may only be stripped with visual_gen=False")
+
+    removed_parameters = 0
+    removed_modules: list[str] = []
+    for module_name, module in list(model.named_modules()):
+        for child_name, child in list(module.named_children()):
+            if not child_name.endswith("_moe_gen"):
+                continue
+            removed_parameters += sum(parameter.numel() for parameter in child.parameters())
+            full_name = f"{module_name}.{child_name}" if module_name else child_name
+            removed_modules.append(full_name)
+            setattr(module, child_name, nn.Identity())
+
+    remaining = [name for name, _ in model.named_parameters() if "_moe_gen" in name]
+    if remaining:
+        raise RuntimeError(f"generation parameters remain after pruning: {remaining[:4]}")
+    if not removed_modules or removed_parameters == 0:
+        raise RuntimeError("expected LLaDA-o MoT generation experts but found none")
+    return removed_parameters
+
+
 def add_lladao_repo(lladao_repo: str | Path) -> Path:
     path = Path(lladao_repo).expanduser().resolve()
     if not (path / "modeling" / "lladao" / "lladao.py").is_file():
@@ -86,6 +119,13 @@ def load_base_model(
     missing, unexpected = load_model(model, str(checkpoint_path), strict=True, device="cpu")
     if missing or unexpected:
         raise RuntimeError(f"checkpoint mismatch: missing={missing}, unexpected={unexpected}")
+    removed_parameters = strip_unused_generation_experts(model)
+    print(
+        "stripped unused LLaDA-o generation experts: "
+        f"{removed_parameters:,} parameters "
+        f"({removed_parameters * 2 / 2**30:.2f} GiB at bf16)",
+        flush=True,
+    )
     model.to(dtype=dtype)
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
