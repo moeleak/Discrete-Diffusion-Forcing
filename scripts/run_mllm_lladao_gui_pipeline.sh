@@ -68,8 +68,11 @@ wait_for_idle_gpus() {
       stable=0
     fi
     echo "[$(timestamp)] GPU idle stability ${stable}/${GPU_STABLE_CHECKS}: ${rows[*]:-unavailable}"
-    (( stable < GPU_STABLE_CHECKS )) && sleep "${GPU_POLL_SECONDS}"
+    if (( stable < GPU_STABLE_CHECKS )); then
+      sleep "${GPU_POLL_SECONDS}"
+    fi
   done
+  return 0
 }
 
 latest_checkpoint() {
