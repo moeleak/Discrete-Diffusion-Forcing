@@ -414,6 +414,20 @@ accelerate launch --num_processes 2 D2F-train/train_lladao_gui.py \
   --config D2F-train/config/lladao_gui.yaml
 ```
 
+The `mllm` eight-GPU launcher writes directly to regular files so scheduler
+log-pipe backpressure cannot pause a training rank. Start it and monitor the
+full log and tqdm ETA separately:
+
+```shell
+bash /home/ma-user/work/train_d2f.sh
+tail -F /home/ma-user/work/LLaDA-o/logs/d2f-8gpu.log
+tail -F /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32-8gpu/progress.log
+```
+
+If a step makes no progress for two minutes, each rank writes its Python stack
+to `runs/d2f-block16-r32-8gpu/diagnostics/rank-N.stack.log`. Data-loader and
+distributed-collective timeouts turn persistent stalls into actionable errors.
+
 The base `ema.safetensors` is never rewritten. Each save directory contains an
 adapter plus `training_state.pt`; only the adapter is needed for inference.
 

@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import sys
+import time
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +17,12 @@ import torch
 import torch._dynamo
 import yaml
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
+from accelerate.utils import (
+    DistributedDataParallelKwargs,
+    InitProcessGroupKwargs,
+    ProjectConfiguration,
+    set_seed,
+)
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup
@@ -84,13 +92,27 @@ def build_loader(config, tokenizer, special_tokens, accelerator):
         use_flex=True,
     )
     dataset.set_epoch(config.seed)
-    return DataLoader(
-        dataset,
+    num_workers = int(config.data.num_workers)
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=1,
-        num_workers=config.data.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_wrapper(),
-        prefetch_factor=config.data.prefetch_factor,
+    )
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = int(config.data.prefetch_factor)
+        loader_kwargs["timeout"] = float(getattr(config.data, "timeout_seconds", 0))
+    return DataLoader(**loader_kwargs)
+
+
+def arm_stall_trace(timeout_seconds: float, trace_file) -> None:
+    """Dump every Python thread if an optimizer step stops making progress."""
+    faulthandler.cancel_dump_traceback_later()
+    faulthandler.dump_traceback_later(
+        timeout_seconds,
+        repeat=True,
+        file=trace_file,
     )
 
 
@@ -160,11 +182,17 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     project_config = ProjectConfiguration(project_dir=str(output_root), logging_dir=str(output_root / "logs"))
     ddp = DistributedDataParallelKwargs(find_unused_parameters=False, broadcast_buffers=False)
+    distributed_config = getattr(config, "distributed", SimpleNamespace())
+    process_group = InitProcessGroupKwargs(
+        timeout=timedelta(
+            seconds=float(getattr(distributed_config, "timeout_seconds", 300))
+        )
+    )
     accelerator = Accelerator(
         mixed_precision="bf16",
         gradient_accumulation_steps=config.train.gradient_accumulation_steps,
         project_config=project_config,
-        kwargs_handlers=[ddp],
+        kwargs_handlers=[ddp, process_group],
     )
     set_seed(int(config.seed) + accelerator.process_index)
     if accelerator.is_main_process:
@@ -219,15 +247,37 @@ def main() -> None:
 
     iterator = iter(loader)
     log_path = output_root / "train.jsonl"
+    progress_handle = None
+    if accelerator.is_main_process:
+        progress_path = output_root / "progress.log"
+        progress_handle = progress_path.open("a", encoding="utf-8", buffering=1)
+        progress_handle.write(
+            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"starting at step {step}/{stop_after_step}\n"
+        )
     progress = tqdm(
         total=stop_after_step,
         initial=step,
         desc="D2F training",
         unit="step",
-        dynamic_ncols=True,
+        dynamic_ncols=False,
+        mininterval=float(getattr(config.train, "progress_refresh_seconds", 10)),
+        miniters=1,
         smoothing=0.1,
+        file=progress_handle if progress_handle is not None else sys.stderr,
         disable=not accelerator.is_main_process,
     )
+    diagnostics_dir = output_root / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    trace_handle = (diagnostics_dir / f"rank-{accelerator.process_index}.stack.log").open(
+        "a", encoding="utf-8", buffering=1
+    )
+    trace_handle.write(
+        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"watching rank {accelerator.process_index} from step {step}\n"
+    )
+    stall_trace_seconds = float(getattr(config.train, "stall_trace_seconds", 120))
+    arm_stall_trace(stall_trace_seconds, trace_handle)
     try:
         while step < stop_after_step:
             try:
@@ -265,11 +315,16 @@ def main() -> None:
                     record = {"step": step, "lr": current_lr, **reduced}
                     with log_path.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record, sort_keys=True) + "\n")
-                    progress.write(json.dumps(record, sort_keys=True))
+                    print(json.dumps(record, sort_keys=True), flush=True)
+            arm_stall_trace(stall_trace_seconds, trace_handle)
             if step % int(config.train.save_every) == 0 or step == stop_after_step:
                 save_checkpoint(accelerator, model, optimizer, scheduler, output_root, step)
     finally:
+        faulthandler.cancel_dump_traceback_later()
         progress.close()
+        trace_handle.close()
+        if progress_handle is not None:
+            progress_handle.close()
 
     accelerator.wait_for_everyone()
 

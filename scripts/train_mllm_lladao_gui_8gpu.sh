@@ -15,8 +15,14 @@ NUM_PROCESSES="${NUM_PROCESSES:-8}"
 LOG_DIR="${LOG_DIR:-${ROOT}/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/d2f-8gpu.log}"
 
-mkdir -p "${LOG_DIR}"
-exec > >(tee -a "${LOG_FILE}") 2>&1
+mkdir -p "${LOG_DIR}" "${OUTPUT_ROOT}/diagnostics"
+
+# Writing every tqdm refresh through a tee into the scheduler's logging pipe can
+# block training when that downstream pipe applies backpressure.  Keep the
+# complete stdout/stderr stream in a regular file; progress has its own file in
+# OUTPUT_ROOT so neither path depends on the platform log collector.
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] stdout/stderr redirected to ${LOG_FILE}"
+exec >>"${LOG_FILE}" 2>&1
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
@@ -34,9 +40,19 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export TORCH_HOME="${TORCH_HOME:-${ROOT}/cache/torch}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTHONFAULTHANDLER=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+export TORCH_NCCL_DESYNC_DEBUG="${TORCH_NCCL_DESYNC_DEBUG:-1}"
+export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+export TORCH_NCCL_ENABLE_MONITORING="${TORCH_NCCL_ENABLE_MONITORING:-1}"
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-300}"
+export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
+export TORCH_NCCL_USE_COMM_NONBLOCKING="${TORCH_NCCL_USE_COMM_NONBLOCKING:-1}"
+export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-${OUTPUT_ROOT}/diagnostics/nccl_trace_}"
 
 echo "[$(timestamp)] starting 8-GPU D2F training"
 echo "[$(timestamp)] full stdout/stderr log: ${LOG_FILE}"
+echo "[$(timestamp)] host kernel: $(uname -r)"
 
 if [[ ! -x "${ACCELERATE}" ]]; then
   echo "accelerate executable not found: ${ACCELERATE}" >&2

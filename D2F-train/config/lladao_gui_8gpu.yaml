@@ -1,5 +1,9 @@
 seed: 42
 
+distributed:
+  # Bound collective failures instead of leaving the other ranks waiting forever.
+  timeout_seconds: 300
+
 paths:
   lladao_repo: /home/ma-user/work/LLaDA-o/src/LLaDA-o
   model_path: /home/ma-user/work/LLaDA-o/models/lladao-gui-mind2web-step750
@@ -32,10 +36,13 @@ train:
   max_grad_norm: 1.0
   log_every: 10
   save_every: 100
+  progress_refresh_seconds: 10
+  stall_trace_seconds: 120
 
 data:
   num_workers: 1
   prefetch_factor: 2
+  timeout_seconds: 120
   expected_num_tokens: 6144
   max_num_tokens: 8192
   max_num_tokens_per_sample: 8192
