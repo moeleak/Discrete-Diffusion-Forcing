@@ -53,9 +53,11 @@ def parse_args() -> argparse.Namespace:
 
 def build_loader(config, tokenizer, special_tokens, accelerator):
     add_lladao_repo(config.paths.lladao_repo)
+    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(
+        Path(config.paths.train_data).resolve()
+    )
     from data.dataset_base import DataConfig, PackedDataset, collate_wrapper
 
-    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(Path(config.paths.train_data).resolve())
     with Path(config.paths.dataset_config).open() as handle:
         grouped = yaml.safe_load(handle)
     data_config = DataConfig(grouped_datasets=grouped)
@@ -137,6 +139,10 @@ def main() -> None:
     with args.config.open(encoding="utf-8") as handle:
         raw_config = yaml.safe_load(handle)
     config = as_namespace(raw_config)
+    train_data = Path(config.paths.train_data).expanduser().resolve()
+    if not train_data.is_dir() or next(train_data.rglob("*.parquet"), None) is None:
+        raise FileNotFoundError(f"training data contains no parquet shards: {train_data}")
+    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(train_data)
     max_steps = int(
         args.max_steps if args.max_steps is not None else config.train.max_steps
     )
