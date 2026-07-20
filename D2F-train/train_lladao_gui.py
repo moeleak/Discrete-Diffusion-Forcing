@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import torch._dynamo
 import yaml
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
@@ -135,6 +136,9 @@ def restore_checkpoint(peft_model, optimizer, scheduler, checkpoint: Path) -> in
 
 
 def main() -> None:
+    # FlexAttention is a higher-order op, which Torch's DDP graph optimizer
+    # cannot partition. Keep Dynamo enabled for FlexAttention itself.
+    torch._dynamo.config.optimize_ddp = False
     args = parse_args()
     with args.config.open(encoding="utf-8") as handle:
         raw_config = yaml.safe_load(handle)
