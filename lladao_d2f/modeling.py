@@ -71,8 +71,16 @@ def load_base_model(
         latent_patch_size=2,
         max_latent_size=64,
     )
-    language_model = LLaDAModelLM(llm_config)
-    vit_model = SiglipVisionModel(vit_config)
+    # Construct directly in the checkpoint dtype. Building both DDP replicas
+    # in FP32 first peaks above the 128 GB host-memory limit before either
+    # process can move its model to the GPU.
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(dtype)
+        language_model = LLaDAModelLM(llm_config)
+        vit_model = SiglipVisionModel(vit_config)
+    finally:
+        torch.set_default_dtype(previous_dtype)
     model = LLaDAO(language_model, vit_model, None, config)
     model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config)
     missing, unexpected = load_model(model, str(checkpoint_path), strict=True, device="cpu")
