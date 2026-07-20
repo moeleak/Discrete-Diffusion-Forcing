@@ -12,13 +12,31 @@ CONFIG="${CONFIG:-${REPO}/D2F-train/config/lladao_gui_8gpu.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-block16-r32-8gpu}"
 MAX_STEPS="${MAX_STEPS:-1377}"
 NUM_PROCESSES="${NUM_PROCESSES:-8}"
+LOG_DIR="${LOG_DIR:-${ROOT}/logs}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/d2f-8gpu.log}"
+
+mkdir -p "${LOG_DIR}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log_exit() {
+  local status=$?
+  echo "[$(timestamp)] 8-GPU training launcher exited with status ${status}"
+}
+trap log_exit EXIT
 
 export PYTHONPATH="${REPO}:${LLADAO}${PYTHONPATH:+:${PYTHONPATH}}"
 export HF_HOME="${HF_HOME:-${ROOT}/cache/hf}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export TORCH_HOME="${TORCH_HOME:-${ROOT}/cache/torch}"
 export TOKENIZERS_PARALLELISM=false
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTHONUNBUFFERED=1
+
+echo "[$(timestamp)] starting 8-GPU D2F training"
+echo "[$(timestamp)] full stdout/stderr log: ${LOG_FILE}"
 
 if [[ ! -x "${ACCELERATE}" ]]; then
   echo "accelerate executable not found: ${ACCELERATE}" >&2
@@ -49,9 +67,18 @@ elif [[ -d "${OUTPUT_ROOT}" ]]; then
 fi
 
 cd "${REPO}"
-exec "${ACCELERATE}" launch \
+echo "[$(timestamp)] processes=${NUM_PROCESSES} config=${CONFIG} max_steps=${MAX_STEPS}"
+if (( ${#resume_args[@]} )); then
+  echo "[$(timestamp)] resuming from ${resume_args[1]}"
+else
+  echo "[$(timestamp)] starting without an adapter checkpoint"
+fi
+"${ACCELERATE}" launch \
+  --multi_gpu \
   --num_processes "${NUM_PROCESSES}" \
+  --num_machines 1 \
   --mixed_precision bf16 \
+  --dynamo_backend no \
   D2F-train/train_lladao_gui.py \
   --config "${CONFIG}" \
   --max-steps "${MAX_STEPS}" \

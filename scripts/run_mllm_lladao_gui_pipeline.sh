@@ -27,7 +27,6 @@ export HF_HOME="${HF_HOME:-${ROOT}/cache/hf}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
 export TORCH_HOME="${TORCH_HOME:-${ROOT}/cache/torch}"
 export TOKENIZERS_PARALLELISM=false
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
