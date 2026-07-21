@@ -13,7 +13,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -45,11 +45,14 @@ def env_int(name: str, default: int) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("baseline", "d2f"), required=True)
+    parser.add_argument(
+        "--backend", choices=("baseline", "d2f", "d2f_vllm"), required=True
+    )
     parser.add_argument("--lladao-repo", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--adapter", type=Path)
+    parser.add_argument("--runtime-model", type=Path)
     parser.add_argument("--benchmark-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--benchmarks", default=DEFAULT_BENCHMARKS)
@@ -76,6 +79,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-threshold", type=float, default=0.9)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-iterations", type=int, default=256)
+    parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument("--master-port", type=int, default=2333)
+    parser.add_argument(
+        "--attention-backend", choices=("sdpa", "flex"), default="sdpa"
+    )
     parser.add_argument("--flush-every", type=int, default=1)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
@@ -88,8 +96,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--warmup must be non-negative and --flush-every must be positive")
     if args.max_new_tokens <= 0 or args.diffusion_steps <= 0:
         parser.error("generation length and diffusion steps must be positive")
-    if args.backend == "d2f" and args.max_new_tokens % args.block_size:
+    if args.backend in {"d2f", "d2f_vllm"} and args.max_new_tokens % args.block_size:
         parser.error("D2F max-new-tokens must be divisible by block-size")
+    if args.backend == "d2f_vllm" and args.runtime_model is None:
+        parser.error("--runtime-model is required for d2f_vllm")
     for name in (
         "block_add_threshold",
         "decoded_token_threshold",
@@ -123,21 +133,73 @@ def select_device(args: argparse.Namespace) -> str:
     return f"cuda:{args.rank % count}"
 
 
+def selected_benchmarks(
+    args: argparse.Namespace, manifest: dict[str, Any]
+) -> list[str]:
+    requested = [item.strip() for item in args.benchmarks.split(",") if item.strip()]
+    available = manifest.get("benchmarks", {})
+    missing = [item for item in requested if item not in available]
+    if missing:
+        print(
+            "Skipping unavailable benchmarks: " + ", ".join(missing),
+            file=sys.stderr,
+            flush=True,
+        )
+    selected = [item for item in requested if item in available]
+    if not selected:
+        raise RuntimeError("none of the requested benchmarks is prepared")
+    return selected
+
+
+def iter_samples(
+    root: Path,
+    manifest: dict[str, Any],
+    benchmark: str,
+    *,
+    rank: int,
+    world_size: int,
+    limit: int | None,
+) -> Iterator[dict[str, Any]]:
+    path = root / manifest["benchmarks"][benchmark]["path"]
+    with path.open(encoding="utf-8") as handle:
+        logical_index = 0
+        for line in handle:
+            if not line.strip():
+                continue
+            if limit is not None and logical_index >= limit:
+                break
+            if logical_index % world_size == rank:
+                yield json.loads(line)
+            logical_index += 1
+
+
+def load_completed(path: Path) -> set[str]:
+    completed: set[str] = set()
+    if not path.exists():
+        return completed
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                completed.add(str(json.loads(line)["sample_id"]))
+            except (json.JSONDecodeError, KeyError) as exc:
+                raise RuntimeError(
+                    f"cannot resume malformed {path}:{line_number}: {exc}"
+                ) from exc
+    return completed
+
+
 def load_protocol(lladao_repo: Path):
     add_lladao_repo(lladao_repo)
     from eval.gui_grounding.metrics import parse_action
     from eval.gui_grounding.reproducibility import paired_sample_seed
-    from eval.gui_grounding.run_benchmark import (
-        iter_samples,
-        load_completed,
-        selected_benchmarks,
-    )
 
     return parse_action, paired_sample_seed, iter_samples, load_completed, selected_benchmarks
 
 
 def model_generate(
-    engine: LLaDAOGuiD2FInference,
+    engine,
     image: Image.Image,
     prompt: str,
     args: argparse.Namespace,
@@ -150,21 +212,38 @@ def model_generate(
             diffusion_steps=args.diffusion_steps,
             confidence_threshold=args.confidence_threshold,
         )
-    return engine.generate(
+    if args.backend == "d2f":
+        return engine.generate(
+            image,
+            prompt,
+            max_new_tokens=args.max_new_tokens,
+            block_size=args.block_size,
+            block_add_threshold=args.block_add_threshold,
+            decoded_token_threshold=args.decoded_token_threshold,
+            skip_threshold=args.skip_threshold,
+            temperature=args.temperature,
+            max_iterations=args.max_iterations,
+        )
+    output = engine.generate_gui(
         image,
         prompt,
         max_new_tokens=args.max_new_tokens,
-        block_size=args.block_size,
-        block_add_threshold=args.block_add_threshold,
-        decoded_token_threshold=args.decoded_token_threshold,
-        skip_threshold=args.skip_threshold,
-        temperature=args.temperature,
         max_iterations=args.max_iterations,
     )
+    return {
+        "raw_text": output.text,
+        "tokens": output.token_ids,
+        "image_cache_seconds": output.image_seconds,
+        "prompt_cache_seconds": output.prompt_seconds,
+        "generation_seconds": output.generation_seconds,
+        "total_seconds": output.total_seconds,
+        "iterations": output.n_diff_steps,
+        "trace": output.trace,
+    }
 
 
 def infer_one(
-    engine: LLaDAOGuiD2FInference,
+    engine,
     root: Path,
     sample: dict[str, Any],
     args: argparse.Namespace,
@@ -249,6 +328,11 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "model_path": str(args.model_path.expanduser().resolve()),
         "checkpoint": str(args.checkpoint.expanduser().resolve()),
         "adapter": str(args.adapter.expanduser().resolve()) if args.adapter else None,
+        "runtime_model": (
+            str(args.runtime_model.expanduser().resolve())
+            if args.runtime_model
+            else None
+        ),
         "benchmark_root": str(args.benchmark_root.expanduser().resolve()),
         "benchmarks": benchmarks,
         "rank": args.rank,
@@ -263,6 +347,8 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "decoded_token_threshold": args.decoded_token_threshold,
         "skip_threshold": args.skip_threshold,
         "temperature": args.temperature,
+        "max_model_len": args.max_model_len,
+        "attention_backend": args.attention_backend,
         "seed": args.seed,
         "sample_seed_policy": "sha256(base_seed, provenance.action_uid || sample_id)",
         "latency_scope": "synchronized image decode, preprocessing, cache construction, and generation",
@@ -286,13 +372,29 @@ def main() -> None:
     )
 
     print(f"Rank {args.rank}/{args.world_size}: loading {args.backend} on {device}", flush=True)
-    engine = LLaDAOGuiD2FInference(
-        lladao_repo=args.lladao_repo,
-        model_path=args.model_path,
-        checkpoint=args.checkpoint,
-        adapter_path=args.adapter,
-        device=device,
-    )
+    if args.backend == "d2f_vllm":
+        os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend
+        from d2f_vllm.lladao_gui_engine import LLaDAOGuiD2FEngine
+
+        engine = LLaDAOGuiD2FEngine(
+            args.runtime_model,
+            max_model_len=args.max_model_len,
+            block_length=args.block_size,
+            max_new_tokens=args.max_new_tokens,
+            block_add_threshold=args.block_add_threshold,
+            decoded_token_threshold=args.decoded_token_threshold,
+            skip_threshold=args.skip_threshold,
+            temperature=args.temperature,
+            master_port=args.master_port,
+        )
+    else:
+        engine = LLaDAOGuiD2FInference(
+            lladao_repo=args.lladao_repo,
+            model_path=args.model_path,
+            checkpoint=args.checkpoint,
+            adapter_path=args.adapter,
+            device=device,
+        )
 
     warmup_samples = []
     for benchmark in benchmarks:
@@ -372,6 +474,8 @@ def main() -> None:
                         f"{record.get('prediction')!r} {latency_text}",
                         flush=True,
                     )
+    if hasattr(engine, "close"):
+        engine.close()
     print(f"Rank {args.rank}: wrote {total_written} predictions", flush=True)
 
 

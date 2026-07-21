@@ -357,6 +357,18 @@ separate output directories, score each directory with
 `eval/gui_grounding/score_benchmark.py`, then enforce the paired quality and
 latency gates with `D2F-eval/compare_lladao_gui.py`.
 
+For the merged native d2f_vllm Non-PD runtime on `mllm`, use:
+
+```shell
+LIMIT=100 GPU=0 bash \
+  /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/d2f_vllm/mllm_lladao_gui_nonpd.sh
+```
+
+The default merged model is
+`/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377`; predictions,
+scores, and the full stdout/stderr log stay below
+`/home/ma-user/work/LLaDA-o/{results,logs}`.
+
 ```shell
 BENCH=$ROOT/data/bench_ocr
 
