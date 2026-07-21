@@ -19,7 +19,10 @@ try:
     import vllm.logger  # noqa: F401
 except ImportError:
     pass
-logging.getLogger("vllm.platforms.rocm").addFilter(_OptionalRocmProbeFilter())
+_rocm_probe_filter = _OptionalRocmProbeFilter()
+logging.getLogger("vllm.platforms.rocm").addFilter(_rocm_probe_filter)
+for _handler in logging.getLogger("vllm").handlers:
+    _handler.addFilter(_rocm_probe_filter)
 
 from d2f_vllm.llm import LLM
 from d2f_vllm.sampling_params import SamplingParams
