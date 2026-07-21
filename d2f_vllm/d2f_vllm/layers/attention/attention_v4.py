@@ -23,11 +23,7 @@ from d2f_vllm.layers.attention.ops import (
     CHECK_STORING, CHECK_LOADING, CHECK_ATTENTION
 )
 from d2f_vllm.utils.context import ContextForDiffusionLM, get_context_causal_lm, get_context_diffusion_lm
-
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-except ImportError:  # pragma: no cover - exercised by CPU-only unit tests
-    flash_attn_varlen_func = None
+from d2f_vllm.utils.vllm_flash import flash_attn_varlen_func
 
 
 class Attention(nn.Module):

@@ -12,11 +12,7 @@ from torch import nn
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as tv_functional
 from transformers import AutoTokenizer
-
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-except ImportError:  # pragma: no cover - exercised by CPU-only unit tests
-    flash_attn_varlen_func = None
+from d2f_vllm.utils.vllm_flash import flash_attn_varlen_func
 
 
 class _VisionAttention(nn.Module):
