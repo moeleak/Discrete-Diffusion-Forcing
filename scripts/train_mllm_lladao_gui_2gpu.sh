@@ -13,8 +13,11 @@ MAX_STEPS="${MAX_STEPS:-1377}"
 NUM_PROCESSES="${NUM_PROCESSES:-2}"
 LOG_DIR="${LOG_DIR:-${ROOT}/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/d2f-2gpu.log}"
+PROGRESS_FILE="${PROGRESS_FILE:-${OUTPUT_ROOT}/progress.log}"
 
 mkdir -p "${LOG_DIR}" "${OUTPUT_ROOT}/diagnostics"
+printf '\n[%s] launcher started; loading model before distributed initialization\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S')" >>"${PROGRESS_FILE}"
 
 # Do not route tqdm through the scheduler's logging pipe: downstream
 # backpressure can block rank 0 inside a progress refresh.  The complete
@@ -45,8 +48,8 @@ export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
 export TORCH_NCCL_ENABLE_MONITORING="${TORCH_NCCL_ENABLE_MONITORING:-1}"
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-300}"
 export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
-export TORCH_NCCL_USE_COMM_NONBLOCKING="${TORCH_NCCL_USE_COMM_NONBLOCKING:-1}"
 export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-${OUTPUT_ROOT}/diagnostics/nccl_trace_}"
+unset TORCH_NCCL_USE_COMM_NONBLOCKING
 
 echo "[$(timestamp)] starting 2-GPU D2F training"
 echo "[$(timestamp)] full stdout/stderr log: ${LOG_FILE}"

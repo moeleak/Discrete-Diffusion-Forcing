@@ -180,22 +180,12 @@ def main() -> None:
         raise ValueError("steps must satisfy 0 < stop-after-step <= max-steps")
     output_root = Path(config.paths.output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    project_config = ProjectConfiguration(project_dir=str(output_root), logging_dir=str(output_root / "logs"))
-    ddp = DistributedDataParallelKwargs(find_unused_parameters=False, broadcast_buffers=False)
-    distributed_config = getattr(config, "distributed", SimpleNamespace())
-    process_group = InitProcessGroupKwargs(
-        timeout=timedelta(
-            seconds=float(getattr(distributed_config, "timeout_seconds", 300))
-        )
-    )
-    accelerator = Accelerator(
-        mixed_precision="bf16",
-        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
-        project_config=project_config,
-        kwargs_handlers=[ddp, process_group],
-    )
-    set_seed(int(config.seed) + accelerator.process_index)
-    if accelerator.is_main_process:
+    # torchrun provides ranks before torch.distributed is initialized.  Build
+    # and load the large CPU model first so its several-minute startup does not
+    # consume the process-group collective timeout.
+    process_index = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
+    set_seed(int(config.seed) + process_index)
+    if process_index == 0:
         with (output_root / "resolved-config.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(raw_config, handle, sort_keys=False)
 
@@ -241,6 +231,24 @@ def main() -> None:
             raise ValueError(
                 f"resume step {step} must be less than stop-after-step {stop_after_step}"
             )
+    project_config = ProjectConfiguration(
+        project_dir=str(output_root), logging_dir=str(output_root / "logs")
+    )
+    ddp = DistributedDataParallelKwargs(
+        find_unused_parameters=False, broadcast_buffers=False
+    )
+    distributed_config = getattr(config, "distributed", SimpleNamespace())
+    process_group = InitProcessGroupKwargs(
+        timeout=timedelta(
+            seconds=float(getattr(distributed_config, "timeout_seconds", 300))
+        )
+    )
+    accelerator = Accelerator(
+        mixed_precision="bf16",
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        project_config=project_config,
+        kwargs_handlers=[ddp, process_group],
+    )
     loader = build_loader(config, tokenizer, special_tokens, accelerator)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     model.train()
