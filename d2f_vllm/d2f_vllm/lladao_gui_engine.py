@@ -103,12 +103,17 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         )
         if self.config.tensor_parallel_size != 1:
             raise ValueError("LLaDA-o GUI Non-PD currently supports TP=1 only")
-        self.prefix_encoder = LLaDAOGuiPrefixEncoder(
-            model,
-            self.model.model.embed_tokens,
-            device=torch.device("cuda", torch.cuda.current_device()),
-            dtype=_config_dtype(self.config.hf_config),
-        )
+        try:
+            self.prefix_encoder = LLaDAOGuiPrefixEncoder(
+                model,
+                self.model.model.embed_tokens,
+                device=torch.device("cuda", torch.cuda.current_device()),
+                dtype=_config_dtype(self.config.hf_config),
+            )
+            self.tokenizer = self.prefix_encoder.tokenizer
+        except BaseException:
+            self.close()
+            raise
 
     def _set_active_context(
         self,

@@ -216,13 +216,29 @@ class LLaDAOGuiPrefixEncoder:
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(self.model_path), use_fast=True, trust_remote_code=False
         )
+        self._ensure_special_tokens()
         self.bos_token_id = self._token_id("<|startoftext|>")
         self.eos_token_id = self._token_id("<|endoftext|>")
         self.start_image_id = self._token_id("<|vision_start|>")
         self.end_image_id = self._token_id("<|vision_end|>")
 
+    def _ensure_special_tokens(self) -> None:
+        existing = set(self.tokenizer.all_special_tokens)
+        ordered = (
+            "<|startoftext|>",
+            "<|endoftext|>",
+            "<|vision_start|>",
+            "<|vision_end|>",
+        )
+        additions = [token for token in ordered if token not in existing]
+        if additions:
+            self.tokenizer.add_tokens(additions)
+
     def _token_id(self, token: str) -> int:
-        token_id = int(self.tokenizer.convert_tokens_to_ids(token))
+        value = self.tokenizer.convert_tokens_to_ids(token)
+        if value is None:
+            raise ValueError(f"runtime tokenizer does not define {token}")
+        token_id = int(value)
         if token_id < 0 or token_id == self.tokenizer.unk_token_id:
             raise ValueError(f"runtime tokenizer does not define {token}")
         return token_id
