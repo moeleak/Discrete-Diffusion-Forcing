@@ -13,6 +13,11 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as tv_functional
 from transformers import AutoTokenizer
 
+try:
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+except ImportError:  # pragma: no cover - exercised by CPU-only unit tests
+    flash_attn_varlen_func = None
+
 
 class _VisionAttention(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int) -> None:
@@ -27,16 +32,33 @@ class _VisionAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         length = hidden_states.size(0)
-        shape = (1, length, self.num_heads, self.head_dim)
-        query = self.q_proj(hidden_states).view(shape).transpose(1, 2)
-        key = self.k_proj(hidden_states).view(shape).transpose(1, 2)
-        value = self.v_proj(hidden_states).view(shape).transpose(1, 2)
-        output = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )
-        return self.out_proj(
-            output.transpose(1, 2).reshape(length, self.hidden_size)
-        )
+        shape = (length, self.num_heads, self.head_dim)
+        query = self.q_proj(hidden_states).view(shape)
+        key = self.k_proj(hidden_states).view(shape)
+        value = self.v_proj(hidden_states).view(shape)
+        if flash_attn_varlen_func is not None and hidden_states.is_cuda:
+            cu_seqlens = torch.tensor(
+                [0, length], dtype=torch.int32, device=hidden_states.device
+            )
+            output = flash_attn_varlen_func(
+                query,
+                key,
+                value,
+                max_seqlen_q=length,
+                cu_seqlens_q=cu_seqlens,
+                max_seqlen_k=length,
+                cu_seqlens_k=cu_seqlens,
+                causal=False,
+            )
+        else:
+            output = F.scaled_dot_product_attention(
+                query.transpose(0, 1).unsqueeze(0),
+                key.transpose(0, 1).unsqueeze(0),
+                value.transpose(0, 1).unsqueeze(0),
+                dropout_p=0.0,
+                is_causal=False,
+            ).squeeze(0).transpose(0, 1)
+        return self.out_proj(output.reshape(length, self.hidden_size))
 
 
 class _VisionMLP(nn.Module):
@@ -172,7 +194,7 @@ class LLaDAOGuiPrefix:
 
 
 class LLaDAOGuiPrefixEncoder:
-    """Exact LLaDA-o GUI preprocessing with a native SDPA SigLIP encoder."""
+    """Exact LLaDA-o GUI preprocessing with a native SigLIP encoder."""
 
     def __init__(
         self,

@@ -237,6 +237,7 @@ class FastDLLMDreamEngine:
             seq_lens_ts=seq_lens_ts,
             kv_cache_layout=self.config.kv_cache_layout,
             need_kv_cache_store=need_kv_cache_store,
+            full_attention=True,
         )
 
     def _set_replace_context(self, context_len: int, block_len: int, slot_mapping: torch.Tensor) -> None:
@@ -463,6 +464,7 @@ class FastDLLMDreamEngine:
             seq_lens_ts=torch.tensor([active_len], dtype=torch.int32, device=torch.cuda.current_device()),
             kv_cache_layout=self.config.kv_cache_layout,
             need_kv_cache_store=True,
+            full_attention=valid_tokens is None or int(valid_tokens) >= active_len,
         )
         try:
             hidden = self.model(input_ids, self._positions_tensor(positions))

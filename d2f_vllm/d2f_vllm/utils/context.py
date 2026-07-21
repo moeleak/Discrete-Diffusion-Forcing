@@ -56,6 +56,7 @@ class ContextForDiffusionLM(ContextBase):
     need_kv_cache_store: bool = True
     block_mask: List[torch.Tensor] | None = None
     decode_delta_state: Any | None = None
+    full_attention: bool = False
     
     def __post_init__(self):
         if self.seq_lens_ts is not None and self.context_lens is not None:
@@ -125,7 +126,7 @@ def set_context_diffusion_lm(
     max_seqlen_q=0, max_seqlen_k=0,
     slot_mapping=None, context_lens=None, block_tables=None,
     seqs= None, seq_lens=None, seq_lens_ts=None, kv_cache_layout="unified", need_kv_cache_store=True,
-    decode_delta_state=None,
+    decode_delta_state=None, full_attention=False,
 ) -> None:
     global _CONTEXT_FOR_DIFFUSION_LM
     _CONTEXT_FOR_DIFFUSION_LM = ContextForDiffusionLM(
@@ -133,7 +134,8 @@ def set_context_diffusion_lm(
         cu_seqlens_q, cu_seqlens_k,
         max_seqlen_q, max_seqlen_k,
         slot_mapping, context_lens, block_tables,
-        seqs, seq_lens, seq_lens_ts, kv_cache_layout, need_kv_cache_store, None, decode_delta_state
+        seqs, seq_lens, seq_lens_ts, kv_cache_layout, need_kv_cache_store,
+        None, decode_delta_state, full_attention
     )
 
 def reset_context_diffusion_lm() -> None:

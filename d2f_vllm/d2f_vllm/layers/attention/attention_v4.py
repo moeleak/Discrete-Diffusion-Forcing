@@ -24,6 +24,11 @@ from d2f_vllm.layers.attention.ops import (
 )
 from d2f_vllm.utils.context import ContextForDiffusionLM, get_context_causal_lm, get_context_diffusion_lm
 
+try:
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+except ImportError:  # pragma: no cover - exercised by CPU-only unit tests
+    flash_attn_varlen_func = None
+
 
 class Attention(nn.Module):
     def __init__(
@@ -78,11 +83,34 @@ class Attention(nn.Module):
                 v_t = v_t.repeat_interleave(repeat, dim=1)
             attn_mask = None
             if dense_mask is not None:
-                attn_mask = dense_mask.to(device=q_t.device, dtype=torch.bool)
+                allowed = dense_mask.to(device=q_t.device, dtype=torch.bool)
+                attn_mask = torch.zeros_like(allowed, dtype=q_t.dtype)
+                attn_mask.masked_fill_(~allowed, torch.finfo(q_t.dtype).min)
                 if attn_mask.ndim == 2:
                     attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
             return F.scaled_dot_product_attention(q_t, k_t, v_t, attn_mask=attn_mask, dropout_p=0.0)
         return self.attention(q_t, k_t, v_t, block_mask=block_mask)
+
+    @staticmethod
+    def _flash_attention_forward(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        context: ContextForDiffusionLM,
+    ) -> torch.Tensor | None:
+        if flash_attn_varlen_func is None or not q.is_cuda:
+            return None
+        output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            max_seqlen_q=context.max_seqlen_q,
+            cu_seqlens_q=context.cu_seqlens_q,
+            max_seqlen_k=context.max_seqlen_k,
+            cu_seqlens_k=context.cu_seqlens_k,
+            causal=False,
+        )
+        return output.transpose(0, 1).unsqueeze(0)
 
     def dllm_block_mask(self, block_mask: torch.Tensor, 
                         B: int, H: int, Q_LEN: int, KV_LEN: int, device: str):
@@ -222,13 +250,17 @@ class Attention(nn.Module):
                 )
             else:
                 # Attention computation
-                q_t, k_t, v_t = [transpose_fn(t) for t in (q, k, v)]
+                o = None
+                if self.model_type == 'diffusion_lm' and context.full_attention:
+                    o = self._flash_attention_forward(q, k, v, context)
+                if o is None:
+                    q_t, k_t, v_t = [transpose_fn(t) for t in (q, k, v)]
 
-                B, H, S, _ = q_t.shape
-                block_mask_fn = self.causal_lm_block_mask if self.model_type == 'causal_lm' else self.dllm_block_mask
-                input_obj = context.cu_seqlens_q if self.model_type == 'causal_lm' else context.block_mask
-                block_mask = block_mask_fn(input_obj, B, H, S, S, str(q.device))
-                o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=input_obj)
+                    B, H, S, _ = q_t.shape
+                    block_mask_fn = self.causal_lm_block_mask if self.model_type == 'causal_lm' else self.dllm_block_mask
+                    input_obj = context.cu_seqlens_q if self.model_type == 'causal_lm' else context.block_mask
+                    block_mask = block_mask_fn(input_obj, B, H, S, S, str(q.device))
+                    o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=input_obj)
         else:
             if self.model_type == 'causal_lm':
                 o = causal_lm_flash_decoding(
@@ -240,16 +272,20 @@ class Attention(nn.Module):
                 config = context.seqs[0].config
                 diffusion_block_size = config.diffusion_block_size
                 if is_unified_layout:
-                    q_t = transpose_fn(q)
                     k_comb, v_comb = load_kvcache(self.k_cache, self.v_cache, context, k, v)
                     # k_comb, v_comb = CHECK_LOADING(k_comb, v_comb, k, v, k_cache, v_cache, context)``
-                    k_t, v_t = transpose_fn(k_comb), transpose_fn(v_comb)
+                    o = None
+                    if context.full_attention:
+                        o = self._flash_attention_forward(q, k_comb, v_comb, context)
+                    q_t = transpose_fn(q)
+                    if o is None:
+                        k_t, v_t = transpose_fn(k_comb), transpose_fn(v_comb)
 
-                    B, H, Sq, _ = q_t.shape
-                    _, _, Skv, _ = k_t.shape
-                    block_mask = self.dllm_block_mask(context.block_mask, B, H, Sq, Skv, str(q.device))
+                        B, H, Sq, _ = q_t.shape
+                        _, _, Skv, _ = k_t.shape
+                        block_mask = self.dllm_block_mask(context.block_mask, B, H, Sq, Skv, str(q.device))
 
-                    o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=context.block_mask)
+                        o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=context.block_mask)
                     o = self._maybe_apply_decode_delta(o, q_t, k, v, context)
                 else:
                     o = torch.empty_like(q)

@@ -154,7 +154,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 [active_len], dtype=torch.int32, device=device
             ),
             kv_cache_layout="unified",
-            need_kv_cache_store=True,
+            need_kv_cache_store=False,
         )
 
     def _forward_image_prefix(
