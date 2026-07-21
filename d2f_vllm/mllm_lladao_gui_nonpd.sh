@@ -46,7 +46,7 @@ echo "[$(date '+%F %T')] LLaDA-o GUI Non-PD: gpu=$GPU limit=$LIMIT model=$RUNTIM
 
 (
   cd "$LLADAO_REPO"
-  "$PYTHON" eval/gui_grounding/score_benchmark.py \
+  "$PYTHON" -m eval.gui_grounding.score_benchmark \
     --benchmark-root "$BENCHMARK_ROOT" \
     --predictions-dir "$OUTPUT_DIR" \
     --output-dir "$OUTPUT_DIR/scores" \
