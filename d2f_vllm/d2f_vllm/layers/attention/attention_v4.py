@@ -17,13 +17,13 @@ except ImportError:
     # PyTorch 2.5 already exposes the same FlexAttention callable directly.
     from torch.nn.attention.flex_attention import flex_attention
 
+from d2f_vllm.utils.vllm_flash import flash_attn_varlen_func
 from d2f_vllm.layers.attention.ops import (
     causal_lm_flash_decoding, diffusion_lm_flash_decoding, diffusion_lm_parallel_flash_decoding,
     store_kvcache_unified_layout, store_kvcache_distinct_layout, load_kvcache,
     CHECK_STORING, CHECK_LOADING, CHECK_ATTENTION
 )
 from d2f_vllm.utils.context import ContextForDiffusionLM, get_context_causal_lm, get_context_diffusion_lm
-from d2f_vllm.utils.vllm_flash import flash_attn_varlen_func
 
 
 class Attention(nn.Module):
