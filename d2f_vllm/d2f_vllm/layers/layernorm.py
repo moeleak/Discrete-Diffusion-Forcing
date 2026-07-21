@@ -1,5 +1,19 @@
+import os
+
 import torch
 from torch import nn
+
+
+_VLLM_OPS = None
+
+
+def _get_vllm_ops():
+    global _VLLM_OPS
+    if _VLLM_OPS is None:
+        from vllm import _custom_ops
+
+        _VLLM_OPS = _custom_ops
+    return _VLLM_OPS
 
 
 class RMSNorm(nn.Module):
@@ -14,7 +28,27 @@ class RMSNorm(nn.Module):
         self.hidden_size = hidden_size
         self.eps = eps
         self.residual_in_fp32 = residual_in_fp32
+        self.backend = os.environ.get(
+            "D2F_VLLM_RMS_NORM_BACKEND", "torch"
+        ).lower()
+        if self.backend not in {"torch", "vllm"}:
+            raise ValueError(
+                "D2F_VLLM_RMS_NORM_BACKEND must be 'torch' or 'vllm'"
+            )
         self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def vllm_forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        ops = _get_vllm_ops()
+        if residual is None:
+            output = torch.empty_like(x)
+            ops.rms_norm(output, x, self.weight.data, self.eps)
+            return output
+        ops.fused_add_rms_norm(x, residual, self.weight.data, self.eps)
+        return x, residual
 
     @torch.compile
     def rms_forward(
@@ -51,6 +85,8 @@ class RMSNorm(nn.Module):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.backend == "vllm" and not self.residual_in_fp32:
+            return self.vllm_forward(x, residual)
         if residual is None:
             return self.rms_forward(x)
         else:

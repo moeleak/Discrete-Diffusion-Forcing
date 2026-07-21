@@ -47,12 +47,19 @@ class _ExactLoRAMixin:
         )
 
     def _apply_exact_lora(
-        self, hidden_states: torch.Tensor, base_output: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        base_output: torch.Tensor,
+        *,
+        lora_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        lora_input = hidden_states.to(self.lora_A.dtype)
+        if lora_input is None:
+            lora_input = hidden_states.to(self.lora_A.dtype)
         lora_hidden = F.linear(lora_input, self.lora_A)
         lora_output = F.linear(lora_hidden, self.lora_B)
-        return (base_output + lora_output * self.lora_scale).to(base_output.dtype)
+        if self.lora_scale != 1.0:
+            lora_output = lora_output * self.lora_scale
+        return (base_output + lora_output).to(base_output.dtype)
 
 
 class _ExactLoRAColumnParallelLinear(_ExactLoRAMixin, ColumnParallelLinear):
@@ -70,9 +77,16 @@ class _ExactLoRAColumnParallelLinear(_ExactLoRAMixin, ColumnParallelLinear):
             rank, alpha, self.input_size, self.output_size_per_partition
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        lora_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         base_output = F.linear(hidden_states, self.weight, self.bias)
-        return self._apply_exact_lora(hidden_states, base_output)
+        return self._apply_exact_lora(
+            hidden_states, base_output, lora_input=lora_input
+        )
 
 
 class _ExactLoRARowParallelLinear(_ExactLoRAMixin, RowParallelLinear):
@@ -90,9 +104,16 @@ class _ExactLoRARowParallelLinear(_ExactLoRAMixin, RowParallelLinear):
             rank, alpha, self.input_size_per_partition, self.output_size
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        lora_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         base_output = F.linear(hidden_states, self.weight, self.bias)
-        return self._apply_exact_lora(hidden_states, base_output)
+        return self._apply_exact_lora(
+            hidden_states, base_output, lora_input=lora_input
+        )
 
 
 class LLaDAOGuiAttention(nn.Module):
@@ -109,6 +130,7 @@ class LLaDAOGuiAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         bias = bool(config.attention_bias)
         lora_rank = int(config.runtime_lora_rank)
+        self.exact_lora = lora_rank > 0
         if lora_rank:
             def projection(output_size: int) -> _ExactLoRAColumnParallelLinear:
                 return _ExactLoRAColumnParallelLinear(
@@ -168,9 +190,23 @@ class LLaDAOGuiAttention(nn.Module):
         hidden_states: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        query = self.q_proj(hidden_states).view(-1, self.num_heads, self.head_dim)
-        key = self.k_proj(hidden_states).view(-1, self.num_kv_heads, self.head_dim)
-        value = self.v_proj(hidden_states)
+        if self.exact_lora:
+            lora_input = hidden_states.to(self.q_proj.lora_A.dtype)
+            query = self.q_proj(
+                hidden_states, lora_input=lora_input
+            ).view(-1, self.num_heads, self.head_dim)
+            key = self.k_proj(
+                hidden_states, lora_input=lora_input
+            ).view(-1, self.num_kv_heads, self.head_dim)
+            value = self.v_proj(hidden_states, lora_input=lora_input)
+        else:
+            query = self.q_proj(hidden_states).view(
+                -1, self.num_heads, self.head_dim
+            )
+            key = self.k_proj(hidden_states).view(
+                -1, self.num_kv_heads, self.head_dim
+            )
+            value = self.v_proj(hidden_states)
         query = self.q_norm(query).reshape(-1, self.num_heads * self.head_dim)
         key = self.k_norm(key).reshape(-1, self.num_kv_heads * self.head_dim)
         query, key = self.rotary_emb(positions, query, key)

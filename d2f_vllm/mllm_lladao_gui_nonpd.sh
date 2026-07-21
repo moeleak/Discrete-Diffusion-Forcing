@@ -18,6 +18,7 @@ LOG="${LOG:-$ROOT/logs/d2f-vllm-nonpd-${RUN_ID}.log}"
 mkdir -p "$(dirname "$LOG")" "$OUTPUT_DIR"
 export CUDA_VISIBLE_DEVICES="$GPU"
 export D2F_VLLM_ATTENTION_BACKEND="${D2F_VLLM_ATTENTION_BACKEND:-sdpa}"
+export D2F_VLLM_RMS_NORM_BACKEND="${D2F_VLLM_RMS_NORM_BACKEND:-vllm}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 
@@ -41,6 +42,7 @@ echo "[$(date '+%F %T')] LLaDA-o GUI Non-PD: gpu=$GPU limit=$LIMIT model=$RUNTIM
   --max-model-len 16384 \
   --master-port "$MASTER_PORT" \
   --attention-backend "$D2F_VLLM_ATTENTION_BACKEND" \
+  --rms-norm-backend "$D2F_VLLM_RMS_NORM_BACKEND" \
   --fail-fast \
   2>&1 | tee -a "$LOG"
 

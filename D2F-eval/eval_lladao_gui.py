@@ -84,6 +84,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--attention-backend", choices=("sdpa", "flex"), default="sdpa"
     )
+    parser.add_argument(
+        "--rms-norm-backend", choices=("torch", "vllm"), default="torch"
+    )
     parser.add_argument("--flush-every", type=int, default=1)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
@@ -349,6 +352,7 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "temperature": args.temperature,
         "max_model_len": args.max_model_len,
         "attention_backend": args.attention_backend,
+        "rms_norm_backend": args.rms_norm_backend,
         "seed": args.seed,
         "sample_seed_policy": "sha256(base_seed, provenance.action_uid || sample_id)",
         "latency_scope": "synchronized image decode, preprocessing, cache construction, and generation",
@@ -374,6 +378,7 @@ def main() -> None:
     print(f"Rank {args.rank}/{args.world_size}: loading {args.backend} on {device}", flush=True)
     if args.backend == "d2f_vllm":
         os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend
+        os.environ["D2F_VLLM_RMS_NORM_BACKEND"] = args.rms_norm_backend
         from d2f_vllm.lladao_gui_engine import LLaDAOGuiD2FEngine
 
         engine = LLaDAOGuiD2FEngine(

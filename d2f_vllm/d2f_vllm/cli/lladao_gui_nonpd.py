@@ -25,12 +25,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask-token-id", type=int, default=126336)
     parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument("--attention-backend", choices=("sdpa", "flex"), default="sdpa")
+    parser.add_argument(
+        "--rms-norm-backend", choices=("torch", "vllm"), default="vllm"
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend
+    os.environ["D2F_VLLM_RMS_NORM_BACKEND"] = args.rms_norm_backend
     from d2f_vllm.lladao_gui_engine import LLaDAOGuiD2FEngine
 
     engine = LLaDAOGuiD2FEngine(

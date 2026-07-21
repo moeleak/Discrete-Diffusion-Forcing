@@ -30,6 +30,12 @@ def test_exact_runtime_lora_matches_peft_inference_arithmetic():
     actual = module._apply_exact_lora(hidden, base_output)
     assert torch.equal(actual, expected)
 
+    shared_input = hidden.float()
+    shared = module._apply_exact_lora(
+        hidden, base_output, lora_input=shared_input
+    )
+    assert torch.equal(shared, expected)
+
 
 def test_lladao_residual_norm_rounds_before_normalizing():
     from d2f_vllm.layers.layernorm import RMSNorm
@@ -98,3 +104,12 @@ def test_sdpa_mask_is_cached_on_the_decode_context():
     assert first.dtype == torch.bfloat16
     assert first[0, 0, 0, 0] == 0
     assert first[0, 0, 0, 1] == torch.finfo(torch.bfloat16).min
+
+
+def test_eager_silu_and_mul_matches_reference_expression():
+    from d2f_vllm.layers.activation import SiluAndMul
+
+    inputs = torch.linspace(-2, 2, 16, dtype=torch.bfloat16).view(2, 8)
+    left, right = inputs.chunk(2, dim=-1)
+    expected = F.silu(left) * right
+    assert torch.equal(SiluAndMul()(inputs), expected)

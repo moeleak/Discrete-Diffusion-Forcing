@@ -364,6 +364,11 @@ LIMIT=100 GPU=0 bash \
   /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/d2f_vllm/mllm_lladao_gui_nonpd.sh
 ```
 
+The launcher uses vLLM's fused CUDA RMSNorm by default. It keeps BF16 inputs
+and FP32 accumulation, and the 100-sample paired gate retains 80% SSR and 100%
+action F1. Set `D2F_VLLM_RMS_NORM_BACKEND=torch` to reproduce the unfused
+PyTorch reduction order when investigating individual-token differences.
+
 The default converted model is
 `/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377-exact`. It
 stores the base projections plus the 128 trained FP32 low-rank residuals, so
