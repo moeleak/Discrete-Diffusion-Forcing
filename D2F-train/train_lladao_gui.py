@@ -48,6 +48,11 @@ def as_namespace(value):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="override paths.output_dir from the YAML config",
+    )
     parser.add_argument("--max-steps", type=int)
     parser.add_argument(
         "--stop-after-step",
@@ -169,6 +174,10 @@ def main() -> None:
     args = parse_args()
     with args.config.open(encoding="utf-8") as handle:
         raw_config = yaml.safe_load(handle)
+    if args.output_dir is not None:
+        raw_config["paths"]["output_dir"] = str(
+            args.output_dir.expanduser().resolve()
+        )
     config = as_namespace(raw_config)
     train_data = Path(config.paths.train_data).expanduser().resolve()
     if not train_data.is_dir() or next(train_data.rglob("*.parquet"), None) is None:

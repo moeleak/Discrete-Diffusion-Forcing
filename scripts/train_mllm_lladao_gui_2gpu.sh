@@ -8,11 +8,11 @@ REPO="${D2F_REPO:-${ROOT}/src/Discrete-Diffusion-Forcing}"
 LLADAO="${LLADAO_REPO:-${ROOT}/src/LLaDA-o}"
 ACCELERATE="${ACCELERATE:-${ROOT}/env/bin/accelerate}"
 CONFIG="${CONFIG:-${REPO}/D2F-train/config/lladao_gui.yaml}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-block16-r32}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-block16-r32-2gpu-scheduler-fixed}"
 MAX_STEPS="${MAX_STEPS:-1377}"
 NUM_PROCESSES="${NUM_PROCESSES:-2}"
 LOG_DIR="${LOG_DIR:-${ROOT}/logs}"
-LOG_FILE="${LOG_FILE:-${LOG_DIR}/d2f-2gpu.log}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/d2f-2gpu-scheduler-fixed.log}"
 PROGRESS_FILE="${PROGRESS_FILE:-${OUTPUT_ROOT}/progress.log}"
 
 mkdir -p "${LOG_DIR}" "${OUTPUT_ROOT}/diagnostics"
@@ -98,5 +98,6 @@ fi
   --dynamo_backend no \
   D2F-train/train_lladao_gui.py \
   --config "${CONFIG}" \
+  --output-dir "${OUTPUT_ROOT}" \
   --max-steps "${MAX_STEPS}" \
   "${resume_args[@]}"

@@ -411,24 +411,27 @@ For the LLaDA-o GUI adapter, update the paths in
 
 ```shell
 accelerate launch --num_processes 2 D2F-train/train_lladao_gui.py \
-  --config D2F-train/config/lladao_gui.yaml
+  --config D2F-train/config/lladao_gui.yaml \
+  --output-dir /path/to/a/new/run
 ```
 
 The `mllm` launchers write directly to regular files so scheduler log-pipe
-backpressure cannot pause a training rank. For the two-GPU recipe, run:
+backpressure cannot pause a training rank. The default `scheduler-fixed` run
+directories intentionally do not resume checkpoints produced by the earlier
+per-rank learning-rate schedule. For the two-GPU recipe, run:
 
 ```shell
 bash /home/ma-user/work/train_d2f_2gpu.sh
-tail -F /home/ma-user/work/LLaDA-o/logs/d2f-2gpu.log
-tail -F /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32/progress.log
+tail -F /home/ma-user/work/LLaDA-o/logs/d2f-2gpu-scheduler-fixed.log
+tail -F /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32-2gpu-scheduler-fixed/progress.log
 ```
 
 For eight GPUs, use the matching launcher and output directory:
 
 ```shell
 bash /home/ma-user/work/train_d2f.sh
-tail -F /home/ma-user/work/LLaDA-o/logs/d2f-8gpu.log
-tail -F /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32-8gpu/progress.log
+tail -F /home/ma-user/work/LLaDA-o/logs/d2f-8gpu-scheduler-fixed.log
+tail -F /home/ma-user/work/LLaDA-o/runs/d2f-block16-r32-8gpu-scheduler-fixed/progress.log
 ```
 
 If a step makes no progress for two minutes, each rank writes its Python stack
