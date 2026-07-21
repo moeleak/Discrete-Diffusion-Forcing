@@ -264,6 +264,8 @@ def convert(args: argparse.Namespace) -> None:
             }
         )
         llm_config.pop("auto_map", None)
+        if "torch_dtype" in llm_config:
+            llm_config["dtype"] = llm_config.pop("torch_dtype")
         (temporary_dir / "config.json").write_text(
             json.dumps(llm_config, indent=2, sort_keys=True) + "\n"
         )

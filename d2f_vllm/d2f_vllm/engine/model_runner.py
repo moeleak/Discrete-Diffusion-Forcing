@@ -23,6 +23,13 @@ from d2f_vllm.utils.context import (
     reset_context_diffusion_lm
 )
 
+
+def _config_dtype(hf_config):
+    dtype = getattr(hf_config, "dtype", None)
+    if dtype is not None:
+        return dtype
+    return getattr(hf_config, "torch_dtype")
+
 class ModelRunnerBase(ABC):
     """Base class for model runners supporting different model types."""
     def __init__(self, config: Config, rank: int, event: Event | List[Event]):
@@ -65,7 +72,7 @@ class ModelRunnerBase(ABC):
         # print(f"[DEBUG][Rank {self.rank}] Setting device to cuda:{device_id}")
         torch.cuda.set_device(device_id)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(_config_dtype(hf_config))
         torch.set_default_device(f"cuda:{device_id}")
         # print(f"[DEBUG][Rank {self.rank}] Initializing model on device cuda:{device_id}")
         self.model = AutoModelLM.from_config(config)
@@ -319,7 +326,7 @@ class ModelRunnerForCausalLM(ModelRunnerBase):
             raise AttributeError(f"Cannot determine head_dim from config: {type(hf_config)}")
         
         block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * 
-                       head_dim * hf_config.torch_dtype.itemsize)
+                       head_dim * _config_dtype(hf_config).itemsize)
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - 
                                         used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
@@ -512,7 +519,7 @@ class ModelRunnerForDiffusionLM(ModelRunnerBase):
         else:
             raise AttributeError(f"Cannot determine head_dim from config: {type(hf_config)}")
         
-        block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize)
+        block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * _config_dtype(hf_config).itemsize)
         get_num_kvcache_blocks = lambda gpu_memory_utilization: int(total * gpu_memory_utilization - 
                                                                     used - peak + current) // block_bytes
         try:

@@ -171,7 +171,11 @@ class SamplerForDream(SamplerForDiffusionLM):
 class AutoSampler:
     MODEL_MAPPING = {
         "qwen3": SamplerForCausalLM,
-        "dream": SamplerForDream
+        "dream": SamplerForDream,
+        # The native GUI engine owns its unshifted, block-causal scheduler and
+        # bypasses ModelRunner.run().  A sampler still has to be constructed by
+        # the shared runner initialization path.
+        "lladao_gui": SamplerForDream,
     }
     @classmethod
     def from_config(cls, config: Config):

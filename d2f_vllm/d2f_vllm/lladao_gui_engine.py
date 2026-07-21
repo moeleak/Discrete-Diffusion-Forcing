@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from d2f_vllm.engine.model_runner import _config_dtype
 from d2f_vllm.fastdllm_engine import (
     FastDLLMDreamEngine,
     _StaticMaskSeq,
@@ -106,7 +107,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             model,
             self.model.model.embed_tokens,
             device=torch.device("cuda", torch.cuda.current_device()),
-            dtype=self.config.hf_config.torch_dtype,
+            dtype=_config_dtype(self.config.hf_config),
         )
 
     def _set_active_context(
