@@ -21,16 +21,23 @@ dependencies = [
     "numpy>=2.3.1",
     "nvitop>=1.5.2",
     "peft>=0.16.0",
+    "pillow>=10.0.0",
     "pip>=25.1.1",
     "pytest>=8.4.1",
     "pyyaml>=6.0.2",
+    "safetensors>=0.4.5",
     "setuptools>=80.9.0",
     "torch",
+    "torchvision",
     "tqdm>=4.67.1",
     "transformers>=4.53.2",
     "viztracer>=1.0.4",
     "matplotlib>=3.10.5",
+    "xxhash>=3.5.0",
 ]
+
+[project.scripts]
+d2f-lladao-gui = "d2f_vllm.cli.lladao_gui_nonpd:main"
 
 [project.urls]
 Homepage = "https://github.com/zhijie-group/d2f_vllm"
@@ -38,7 +45,7 @@ Repository = "https://zhijie-group.github.io/d2f_vllm"
 "Organization" = "https://github.com/zhijie-group"
 
 [tool.setuptools.packages.find]
-include = ["d2f_vllm"]
+include = ["d2f_vllm*"]
 
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"

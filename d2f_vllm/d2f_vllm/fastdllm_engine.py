@@ -153,6 +153,9 @@ class FastDLLMDreamEngine:
         kv_cache_layout: str = "unified",
         master_port: int = 2333,
         shm_name: str = "d2f_vllm_fastdllm",
+        model_name: str = "dream",
+        num_kvcache_blocks: int = -1,
+        skip_model_warmup: bool = False,
     ) -> None:
         self.block_length = int(block_length)
         self.mask_token_id = int(mask_token_id)
@@ -163,7 +166,7 @@ class FastDLLMDreamEngine:
 
         cfg = Config(
             model=model,
-            model_name="dream",
+            model_name=model_name,
             model_type="diffusion_lm",
             mask_token_id=self.mask_token_id,
             diffusion_block_size=self.block_length,
@@ -176,6 +179,8 @@ class FastDLLMDreamEngine:
             kv_cache_layout=kv_cache_layout,
             master_port=master_port,
             shm_name=shm_name,
+            num_kvcache_blocks=num_kvcache_blocks,
+            skip_model_warmup=skip_model_warmup,
         )
         if cfg.kv_cache_layout not in ("unified", "distinct"):
             raise ValueError(f"FastDLLMDreamEngine supports kv_cache_layout='unified' or 'distinct', got '{cfg.kv_cache_layout}'.")

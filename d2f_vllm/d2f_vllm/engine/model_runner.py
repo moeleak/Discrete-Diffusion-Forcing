@@ -72,7 +72,8 @@ class ModelRunnerBase(ABC):
         # print(f"[DEBUG][Rank {self.rank}] Model initialized successfully")
         self.sampler = AutoSampler.from_config(config)
         # print(f"[DEBUG][Rank {self.rank}] Sampler initialized successfully")
-        self.warmup_model()
+        if not config.skip_model_warmup:
+            self.warmup_model()
         self.allocate_kv_cache()  # NOCHANGE
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -515,7 +516,11 @@ class ModelRunnerForDiffusionLM(ModelRunnerBase):
         get_num_kvcache_blocks = lambda gpu_memory_utilization: int(total * gpu_memory_utilization - 
                                                                     used - peak + current) // block_bytes
         try:
-            num_kvcache_blocks = get_num_kvcache_blocks(config.gpu_memory_utilization)
+            num_kvcache_blocks = (
+                config.num_kvcache_blocks
+                if config.num_kvcache_blocks > 0
+                else get_num_kvcache_blocks(config.gpu_memory_utilization)
+            )
             assert num_kvcache_blocks > 0
         except:
             gpu_memory_utilization = config.gpu_memory_utilization
