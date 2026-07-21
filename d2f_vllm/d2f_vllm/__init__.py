@@ -12,8 +12,13 @@ class _OptionalRocmProbeFilter(logging.Filter):
 
 
 # vLLM imports its ROCm platform module while enumerating plugins, even on an
-# NVIDIA-only host. Install this narrow filter before importing any runtime
-# modules; all other vLLM, CUDA, and NCCL warnings remain visible.
+# NVIDIA-only host. Let vLLM configure logging first because dictConfig clears
+# filters installed on pre-existing child loggers, then install this narrow
+# filter before importing any runtime modules. All other warnings remain.
+try:
+    import vllm.logger  # noqa: F401
+except ImportError:
+    pass
 logging.getLogger("vllm.platforms.rocm").addFilter(_OptionalRocmProbeFilter())
 
 from d2f_vllm.llm import LLM
