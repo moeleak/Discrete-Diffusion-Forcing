@@ -2,6 +2,10 @@ import os
 from dataclasses import dataclass
 from transformers import AutoConfig
 
+from d2f_vllm.models.config.lladao_gui.configuration_lladao_gui import (
+    LLaDAOGuiConfig,
+)
+
 
 @dataclass
 class Config:
@@ -56,6 +60,9 @@ class Config:
             if not os.path.exists(self.lora_path):
                 print(f"Warning: LoRA path {self.lora_path} does not exist")
 
-        self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
+        if self.model_name == "lladao_gui":
+            self.hf_config = LLaDAOGuiConfig.from_pretrained(self.model)
+        else:
+            self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         assert self.max_num_batched_tokens >= self.max_model_len

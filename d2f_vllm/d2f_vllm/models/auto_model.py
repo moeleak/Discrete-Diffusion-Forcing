@@ -2,12 +2,14 @@ from d2f_vllm.config import Config
 from d2f_vllm.utils.loader import load_model
 from d2f_vllm.models.dream import DreamForDiffusionLM
 from d2f_vllm.models.qwen3 import Qwen3ForCausalLM
+from d2f_vllm.models.lladao_gui import LLaDAOGuiForDiffusionLM
 
 
 class AutoModelLM:
     MODEL_MAPPING = {
         "qwen3": Qwen3ForCausalLM,
-        "dream": DreamForDiffusionLM
+        "dream": DreamForDiffusionLM,
+        "lladao_gui": LLaDAOGuiForDiffusionLM,
     }
     @classmethod
     def from_config(cls, config: Config):

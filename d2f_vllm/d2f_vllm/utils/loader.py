@@ -9,6 +9,19 @@ from safetensors import safe_open
 from d2f_vllm.config import Config
 
 
+def _base_weight_files(model_path: str) -> list[str]:
+    """Resolve only language-model shards, excluding sidecar vision weights."""
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as handle:
+            index = json.load(handle)
+        return sorted({os.path.join(model_path, name) for name in index["weight_map"].values()})
+    direct = os.path.join(model_path, "model.safetensors")
+    if os.path.isfile(direct):
+        return [direct]
+    return sorted(glob(os.path.join(model_path, "model-*.safetensors")))
+
+
 def load_lora_config(lora_path: str) -> dict:
     """Load LoRA configuration from adapter_config.json."""
     config_path = os.path.join(lora_path, "adapter_config.json")
@@ -54,7 +67,10 @@ def load_model(model: nn.Module, config: Config):
     
     # Load base model weights
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
-    for file in tqdm(glob(os.path.join(config.model, "*.safetensors")), desc="Loading base model"):
+    files = _base_weight_files(config.model)
+    if not files:
+        raise FileNotFoundError(f"No model safetensors found under {config.model}")
+    for file in tqdm(files, desc="Loading base model"):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
                 for k in packed_modules_mapping:

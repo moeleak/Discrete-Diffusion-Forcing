@@ -8,7 +8,14 @@ from typing import List
 from functools import lru_cache, partial
 from einops import rearrange
 from torch.nn.attention.flex_attention import create_block_mask 
-from transformers.integrations.flex_attention import compile_friendly_flex_attention as flex_attention
+try:
+    from transformers.integrations.flex_attention import (
+        compile_friendly_flex_attention as flex_attention,
+    )
+except ImportError:
+    # transformers 4.49 is required by the released LLaDA-o modeling code.
+    # PyTorch 2.5 already exposes the same FlexAttention callable directly.
+    from torch.nn.attention.flex_attention import flex_attention
 
 from d2f_vllm.layers.attention.ops import (
     causal_lm_flash_decoding, diffusion_lm_flash_decoding, diffusion_lm_parallel_flash_decoding,
