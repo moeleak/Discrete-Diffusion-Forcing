@@ -59,6 +59,7 @@ class LLaDAOGuiAttention(nn.Module):
             max_position=config.max_position_embeddings,
             base=config.rope_theta,
             rope_scaling=config.rope_scaling,
+            compute_in_float32=False,
         )
         self.attn = Attention(
             self.num_heads,
@@ -110,9 +111,15 @@ class LLaDAOGuiDecoderLayer(nn.Module):
         super().__init__()
         self.self_attn = LLaDAOGuiAttention(config)
         self.mlp = LLaDAOGuiMLP(config)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            residual_in_fp32=False,
+        )
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            residual_in_fp32=False,
         )
 
     def forward(
@@ -142,7 +149,11 @@ class LLaDAOGuiModel(nn.Module):
         self.layers = nn.ModuleList(
             LLaDAOGuiDecoderLayer(config) for _ in range(config.num_hidden_layers)
         )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            residual_in_fp32=False,
+        )
 
     def forward(
         self,

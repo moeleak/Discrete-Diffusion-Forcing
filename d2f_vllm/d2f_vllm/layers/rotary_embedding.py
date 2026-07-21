@@ -7,13 +7,20 @@ def apply_rotary_emb(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    *,
+    compute_in_float32: bool,
 ) -> torch.Tensor:
     cos = cos.unsqueeze(-2)
     sin = sin.unsqueeze(-2)
-    x1, x2 = torch.chunk(x.to(torch.float32), 2, dim=-1)
-    y1 = x1 * cos - x2 * sin
-    y2 = x2 * cos + x1 * sin
-    return torch.cat((y1, y2), dim=-1).to(x.dtype)
+    if compute_in_float32:
+        working = x.to(torch.float32)
+    else:
+        working = x
+        cos = cos.to(x.dtype)
+        sin = sin.to(x.dtype)
+    x1, x2 = torch.chunk(working, 2, dim=-1)
+    rotated = torch.cat((-x2, x1), dim=-1)
+    return (working * cos + rotated * sin).to(x.dtype)
 
 
 class RotaryEmbedding(nn.Module):
@@ -24,9 +31,11 @@ class RotaryEmbedding(nn.Module):
         rotary_dim: int,
         max_position_embeddings: int,
         base: float,
+        compute_in_float32: bool = True,
     ) -> None:
         super().__init__()
         self.head_size = head_size
+        self.compute_in_float32 = compute_in_float32
         assert rotary_dim == head_size
         inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         t = torch.arange(max_position_embeddings, dtype=torch.float)
@@ -56,23 +65,40 @@ class RotaryEmbedding(nn.Module):
         query_shape = query.shape
         nheads_q = query_shape[-1] // self.head_size
         query = query.view(q_tokens, nheads_q, self.head_size)
-        query = apply_rotary_emb(query, cos, sin).view(query_shape)
+        query = apply_rotary_emb(
+            query,
+            cos,
+            sin,
+            compute_in_float32=self.compute_in_float32,
+        ).view(query_shape)
 
         key_shape = key.shape
         nheads_k = key_shape[-1] // self.head_size
         key = key.view(k_tokens, nheads_k, self.head_size)
-        key = apply_rotary_emb(key, cos, sin).view(key_shape)
+        key = apply_rotary_emb(
+            key,
+            cos,
+            sin,
+            compute_in_float32=self.compute_in_float32,
+        ).view(key_shape)
         return query, key
 
 
-@lru_cache(1)
+@lru_cache(8)
 def get_rope(
     head_size: int,
     rotary_dim: int,
     max_position: int,
     base: float,
     rope_scaling: dict | None = None,
+    compute_in_float32: bool = True,
 ):
     assert rope_scaling is None
-    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
+    rotary_emb = RotaryEmbedding(
+        head_size,
+        rotary_dim,
+        max_position,
+        base,
+        compute_in_float32=compute_in_float32,
+    )
     return rotary_emb
