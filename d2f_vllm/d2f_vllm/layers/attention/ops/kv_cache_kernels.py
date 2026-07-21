@@ -286,19 +286,25 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     
     ctxlens = context.context_lens
     seqlens = context.seq_lens_ts
-    assert sum(seqlens) == k_new.shape[0]
+    if seqlens.shape != (NUM_SEQS,):
+        raise ValueError("seq_lens_ts must contain one length per sequence")
     DIFFUSION_BLOCK_SIZE = context.seqs[0].diffusion_block_size
     if DIFFUSION_BLOCK_SIZE <= 0:
         raise ValueError("diffusion_block_size must be positive")
     
-    total_lens = ctxlens + seqlens
     cu_seqlens_q = context.cu_seqlens_q
     cu_seqlens_k = context.cu_seqlens_k
-    assert sum(total_lens) == cu_seqlens_k[-1]
     assert cu_seqlens_q.shape == cu_seqlens_k.shape
     assert cu_seqlens_q.shape[0] == NUM_SEQS + 1
     
-    kv_output_shape = (sum(total_lens).item(), H_KV, HEAD_DIM)
+    if NUM_SEQS == 1:
+        # max_seqlen_k is Python metadata for the single-sequence GUI path.
+        # Reading cu_seqlens_k[-1] with .item() here would serialize every
+        # decoder layer on the default CUDA stream.
+        total_k_tokens = int(context.max_seqlen_k)
+    else:
+        total_k_tokens = int(cu_seqlens_k[-1].item())
+    kv_output_shape = (total_k_tokens, H_KV, HEAD_DIM)
     k_output = torch.empty(kv_output_shape, device=k_cache.device, dtype=k_cache.dtype)
     v_output = torch.empty_like(k_output)
     

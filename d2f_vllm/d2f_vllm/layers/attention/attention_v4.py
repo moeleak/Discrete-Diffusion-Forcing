@@ -77,15 +77,34 @@ class Attention(nn.Module):
                 repeat = q_t.shape[1] // k_t.shape[1]
                 k_t = k_t.repeat_interleave(repeat, dim=1)
                 v_t = v_t.repeat_interleave(repeat, dim=1)
-            attn_mask = None
-            if dense_mask is not None:
-                allowed = dense_mask.to(device=q_t.device, dtype=torch.bool)
+            attn_mask = dense_mask
+            if attn_mask is not None and attn_mask.dtype == torch.bool:
+                allowed = attn_mask.to(device=q_t.device)
                 attn_mask = torch.zeros_like(allowed, dtype=q_t.dtype)
                 attn_mask.masked_fill_(~allowed, torch.finfo(q_t.dtype).min)
-                if attn_mask.ndim == 2:
-                    attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+            if attn_mask is not None and attn_mask.ndim == 2:
+                attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
             return F.scaled_dot_product_attention(q_t, k_t, v_t, attn_mask=attn_mask, dropout_p=0.0)
         return self.attention(q_t, k_t, v_t, block_mask=block_mask)
+
+    @staticmethod
+    def _cached_sdpa_mask(
+        context: ContextForDiffusionLM,
+        reference: torch.Tensor,
+        allowed: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if allowed is None:
+            allowed = getattr(context, "block_mask", None)
+        if allowed is None:
+            return None
+        cached = getattr(context, "_sdpa_mask", None)
+        if cached is None or cached.dtype != reference.dtype:
+            allowed = allowed.to(device=reference.device, dtype=torch.bool)
+            cached = torch.zeros_like(allowed, dtype=reference.dtype)
+            cached.masked_fill_(~allowed, torch.finfo(reference.dtype).min)
+            cached = cached.unsqueeze(0).unsqueeze(0)
+            context._sdpa_mask = cached
+        return cached
 
     @staticmethod
     def _flash_attention_forward(
@@ -255,8 +274,15 @@ class Attention(nn.Module):
                     B, H, S, _ = q_t.shape
                     block_mask_fn = self.causal_lm_block_mask if self.model_type == 'causal_lm' else self.dllm_block_mask
                     input_obj = context.cu_seqlens_q if self.model_type == 'causal_lm' else context.block_mask
-                    block_mask = block_mask_fn(input_obj, B, H, S, S, str(q.device))
-                    o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=input_obj)
+                    block_mask = None
+                    dense_mask = input_obj
+                    if self.attention_backend == "sdpa":
+                        dense_mask = self._cached_sdpa_mask(
+                            context, q_t, input_obj
+                        )
+                    else:
+                        block_mask = block_mask_fn(input_obj, B, H, S, S, str(q.device))
+                    o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=dense_mask)
         else:
             if self.model_type == 'causal_lm':
                 o = causal_lm_flash_decoding(
@@ -279,9 +305,14 @@ class Attention(nn.Module):
 
                         B, H, Sq, _ = q_t.shape
                         _, _, Skv, _ = k_t.shape
-                        block_mask = self.dllm_block_mask(context.block_mask, B, H, Sq, Skv, str(q.device))
+                        block_mask = None
+                        dense_mask = context.block_mask
+                        if self.attention_backend == "sdpa":
+                            dense_mask = self._cached_sdpa_mask(context, q_t)
+                        else:
+                            block_mask = self.dllm_block_mask(context.block_mask, B, H, Sq, Skv, str(q.device))
 
-                        o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=context.block_mask)
+                        o = self._attention_forward(q_t, k_t, v_t, block_mask=block_mask, dense_mask=dense_mask)
                     o = self._maybe_apply_decode_delta(o, q_t, k, v, context)
                 else:
                     o = torch.empty_like(q)

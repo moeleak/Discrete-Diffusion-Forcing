@@ -82,3 +82,19 @@ def test_generation_attention_mask_rejects_partial_blocks():
 
     with pytest.raises(ValueError):
         build_generation_attention_mask(3, 6, 4, device=torch.device("cpu"))
+
+
+def test_sdpa_mask_is_cached_on_the_decode_context():
+    from d2f_vllm.layers.attention.attention_v4 import Attention
+    from d2f_vllm.utils.context import ContextForDiffusionLM
+
+    allowed = torch.tensor([[True, False], [True, True]])
+    context = ContextForDiffusionLM(block_mask=allowed)
+    reference = torch.empty(1, dtype=torch.bfloat16)
+    first = Attention._cached_sdpa_mask(context, reference)
+    second = Attention._cached_sdpa_mask(context, reference)
+    assert first is second
+    assert first.shape == (1, 1, 2, 2)
+    assert first.dtype == torch.bfloat16
+    assert first[0, 0, 0, 0] == 0
+    assert first[0, 0, 0, 1] == torch.finfo(torch.bfloat16).min
