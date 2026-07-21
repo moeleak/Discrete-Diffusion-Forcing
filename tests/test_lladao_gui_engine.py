@@ -21,12 +21,14 @@ def test_lladao_rope_can_match_bfloat16_reference_arithmetic():
     from d2f_vllm.layers.rotary_embedding import apply_rotary_emb
 
     x = torch.arange(16, dtype=torch.bfloat16).view(1, 2, 8) / 8
-    cos = torch.linspace(0.25, 1.0, 8)
-    sin = torch.linspace(-0.5, 0.5, 8)
+    cos = torch.linspace(0.25, 1.0, 4)
+    sin = torch.linspace(-0.5, 0.5, 4)
     first, second = x.chunk(2, dim=-1)
     rotated = torch.cat((-second, first), dim=-1)
-    expected = x * cos.to(torch.bfloat16).unsqueeze(-2)
-    expected += rotated * sin.to(torch.bfloat16).unsqueeze(-2)
+    cos_full = torch.cat((cos, cos)).to(torch.bfloat16).unsqueeze(-2)
+    sin_full = torch.cat((sin, sin)).to(torch.bfloat16).unsqueeze(-2)
+    expected = x * cos_full
+    expected += rotated * sin_full
     actual = apply_rotary_emb(
         x, cos, sin, compute_in_float32=False
     )

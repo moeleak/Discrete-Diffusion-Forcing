@@ -14,10 +14,14 @@ def apply_rotary_emb(
     sin = sin.unsqueeze(-2)
     if compute_in_float32:
         working = x.to(torch.float32)
+        x1, x2 = torch.chunk(working, 2, dim=-1)
+        y1 = x1 * cos - x2 * sin
+        y2 = x2 * cos + x1 * sin
+        return torch.cat((y1, y2), dim=-1).to(x.dtype)
     else:
         working = x
-        cos = cos.to(x.dtype)
-        sin = sin.to(x.dtype)
+        cos = torch.cat((cos, cos), dim=-1).to(x.dtype)
+        sin = torch.cat((sin, sin), dim=-1).to(x.dtype)
     x1, x2 = torch.chunk(working, 2, dim=-1)
     rotated = torch.cat((-x2, x1), dim=-1)
     return (working * cos + rotated * sin).to(x.dtype)
