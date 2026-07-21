@@ -249,16 +249,17 @@ def load_kvcache_kernel_kv(k_cache_ptr, v_cache_ptr,
         offs_kv_new_seq = tl.arange(0, DIFFUSION_BLOCK_SIZE)
         offs_kv_new_hdim = tl.arange(0, HEAD_DIM)
         
-        for diff_blk_idx in tl.range(active_seqlen // DIFFUSION_BLOCK_SIZE, loop_unroll_factor=KV_LOAD_UNROLL_FACTOR):
+        for diff_blk_idx in tl.range(tl.cdiv(active_seqlen, DIFFUSION_BLOCK_SIZE), loop_unroll_factor=KV_LOAD_UNROLL_FACTOR):
             off_diff_blk = diff_blk_idx * DIFFUSION_BLOCK_SIZE
+            active_mask = off_diff_blk + offs_kv_new_seq[None, :] < active_seqlen
             cur_kv_new_start_idx = kv_new_start_idx + off_diff_blk
             offs_cur_kv_new_seq = ( # [Seq, Hkv, Hdim]
                 (cur_kv_new_start_idx + offs_kv_new_seq[None, :]) * kv_new_stride_s + # Seq: TokenIds over Offset
                 kv_head_idx * kv_new_stride_h + # Hkv: HeadId
                 offs_kv_new_hdim[:, None] * kv_new_stride_d # Hdim: HeadDim Elems
             )
-            k_new = tl.load(k_new_ptr + offs_cur_kv_new_seq)
-            v_new = tl.load(v_new_ptr + offs_cur_kv_new_seq)
+            k_new = tl.load(k_new_ptr + offs_cur_kv_new_seq, mask=active_mask, other=0.0)
+            v_new = tl.load(v_new_ptr + offs_cur_kv_new_seq, mask=active_mask, other=0.0)
 
             # Store KV new into output KV tensors
             off_ctxlen = seq_idx * ctxlens_stride
@@ -271,8 +272,8 @@ def load_kvcache_kernel_kv(k_cache_ptr, v_cache_ptr,
                 kv_head_idx * kv_out_stride_h + # Hkv: HeadId
                 offs_kv_new_hdim[:, None] * kv_out_stride_d # Hdim: HeadDim Elems
             )
-            tl.store(k_out_ptr + offs_cur_kv_new_to_out, k_new)
-            tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new)
+            tl.store(k_out_ptr + offs_cur_kv_new_to_out, k_new, mask=active_mask)
+            tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new, mask=active_mask)
 
 
 def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
@@ -287,8 +288,8 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     seqlens = context.seq_lens_ts
     assert sum(seqlens) == k_new.shape[0]
     DIFFUSION_BLOCK_SIZE = context.seqs[0].diffusion_block_size
-    MAX_DIFFUSION_BLOCK_SIZE = max(seqlens)
-    assert MAX_DIFFUSION_BLOCK_SIZE % DIFFUSION_BLOCK_SIZE == 0
+    if DIFFUSION_BLOCK_SIZE <= 0:
+        raise ValueError("diffusion_block_size must be positive")
     
     total_lens = ctxlens + seqlens
     cu_seqlens_q = context.cu_seqlens_q
