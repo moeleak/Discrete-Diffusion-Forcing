@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${ROOT:-/home/ma-user/work/LLaDA-o}"
 REPO="${REPO:-$ROOT/src/Discrete-Diffusion-Forcing}"
 PYTHON="${PYTHON:-$ROOT/env-d2f-vllm/bin/python}"
-RUNTIME_MODEL="${RUNTIME_MODEL:-$ROOT/models/lladao-gui-d2f-vllm-step1377}"
+RUNTIME_MODEL="${RUNTIME_MODEL:-$ROOT/models/lladao-gui-d2f-vllm-step1377-exact}"
 SOURCE_MODEL="${SOURCE_MODEL:-$ROOT/models/lladao-gui-mind2web-step750}"
 LLADAO_REPO="${LLADAO_REPO:-$ROOT/src/LLaDA-o}"
 BENCHMARK_ROOT="${BENCHMARK_ROOT:-$ROOT/data/bench_ocr}"

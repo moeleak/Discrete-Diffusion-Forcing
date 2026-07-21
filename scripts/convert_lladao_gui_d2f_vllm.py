@@ -3,8 +3,10 @@
 
 The source checkpoint contains both understanding and visual-generation
 experts.  The runtime only needs the understanding language path and the
-vision prefix encoder.  This converter also merges the trained PEFT LoRA into
-the four attention projections so serving never depends on PEFT.
+vision prefix encoder.  By default this converter embeds the trained PEFT
+weights as an exact FP32 low-rank residual, so serving does not depend on PEFT
+and remains numerically equivalent to the evaluated adapter.  A compact but
+numerically different BF16 merged form remains available with ``--merge-lora``.
 """
 
 from __future__ import annotations
@@ -206,7 +208,7 @@ def convert(args: argparse.Namespace) -> None:
         rank = int(adapter_config["r"])
         alpha = float(adapter_config["lora_alpha"])
         scale = alpha / rank
-        merged_modules: list[str] = []
+        adapted_modules: list[str] = []
 
         def language_tensors():
             for source_key in sorted(source_locations):
@@ -219,11 +221,19 @@ def convert(args: argparse.Namespace) -> None:
                     key_a, key_b = adapter_keys
                     if key_a not in adapter_tensors or key_b not in adapter_tensors:
                         raise KeyError(f"missing LoRA pair for {source_key}")
-                    delta = torch.mm(
-                        adapter_tensors[key_b].float(), adapter_tensors[key_a].float()
-                    ).mul_(scale)
-                    tensor = tensor.float().add_(delta).to(tensor.dtype)
-                    merged_modules.append(runtime_key.removesuffix(".weight"))
+                    module_key = runtime_key.removesuffix(".weight")
+                    adapted_modules.append(module_key)
+                    if args.merge_lora:
+                        delta = torch.mm(
+                            adapter_tensors[key_b].float(),
+                            adapter_tensors[key_a].float(),
+                        ).mul_(scale)
+                        tensor = tensor.float().add_(delta).to(tensor.dtype)
+                    else:
+                        yield runtime_key, tensor
+                        yield f"{module_key}.lora_A", adapter_tensors[key_a].float()
+                        yield f"{module_key}.lora_B", adapter_tensors[key_b].float()
+                        continue
                 yield runtime_key, tensor
 
         weight_map, total_size = _write_language_shards(
@@ -232,9 +242,9 @@ def convert(args: argparse.Namespace) -> None:
             max_shard_bytes=int(args.max_shard_size_gib * 2**30),
         )
         expected_merges = int(args.expected_layers) * 4
-        if len(merged_modules) != expected_merges:
+        if len(adapted_modules) != expected_merges:
             raise RuntimeError(
-                f"expected {expected_merges} merged attention modules, got {len(merged_modules)}"
+                f"expected {expected_merges} adapted attention modules, got {len(adapted_modules)}"
             )
         (temporary_dir / "model.safetensors.index.json").write_text(
             json.dumps(
@@ -261,6 +271,8 @@ def convert(args: argparse.Namespace) -> None:
                 "model_type": "lladao_gui",
                 "qk_norm": True,
                 "tie_word_embeddings": False,
+                "runtime_lora_rank": 0 if args.merge_lora else rank,
+                "runtime_lora_alpha": alpha,
             }
         )
         llm_config.pop("auto_map", None)
@@ -282,15 +294,23 @@ def convert(args: argparse.Namespace) -> None:
             json.dumps(vision_config, indent=2, sort_keys=True) + "\n"
         )
         tokenizer_files = _copy_tokenizer_files(model_dir, temporary_dir)
+        adapter_mode = "merged_bf16" if args.merge_lora else "exact_fp32_residual"
         manifest = {
-            "format": "lladao-gui-d2f-vllm-merged-v1",
+            "format": (
+                "lladao-gui-d2f-vllm-merged-v1"
+                if args.merge_lora
+                else "lladao-gui-d2f-vllm-exact-lora-v2"
+            ),
             "source_checkpoint": str(checkpoint),
             "source_adapter": str(adapter_dir),
+            "adapter_mode": adapter_mode,
             "adapter_rank": rank,
             "adapter_alpha": alpha,
             "adapter_scale": scale,
-            "merged_module_count": len(merged_modules),
-            "merged_modules": merged_modules,
+            "adapted_module_count": len(adapted_modules),
+            "adapted_modules": adapted_modules,
+            "merged_module_count": len(adapted_modules) if args.merge_lora else 0,
+            "runtime_lora_module_count": 0 if args.merge_lora else len(adapted_modules),
             "language_tensor_count": len(weight_map),
             "language_bytes": total_size,
             "vision_tensor_count": len(vision),
@@ -305,7 +325,8 @@ def convert(args: argparse.Namespace) -> None:
         raise
 
     print(
-        f"converted {len(weight_map)} language tensors, merged {len(merged_modules)} LoRA modules, "
+        f"converted {len(weight_map)} language tensors with {adapter_mode} for "
+        f"{len(adapted_modules)} LoRA modules, "
         f"and copied {len(vision)} vision tensors to {output_dir}",
         flush=True,
     )
@@ -318,6 +339,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-layers", type=int, default=32)
+    parser.add_argument(
+        "--merge-lora",
+        action="store_true",
+        help="merge LoRA into BF16 projections instead of preserving the exact FP32 residual",
+    )
     parser.add_argument("--max-shard-size-gib", type=float, default=2.0)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()

@@ -24,6 +24,8 @@ class LLaDAOGuiConfig(PretrainedConfig):
         rope_scaling: dict | None = None,
         attention_bias: bool = False,
         qk_norm: bool = True,
+        runtime_lora_rank: int = 0,
+        runtime_lora_alpha: float = 1.0,
         use_cache: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
@@ -41,5 +43,7 @@ class LLaDAOGuiConfig(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.qk_norm = qk_norm
+        self.runtime_lora_rank = runtime_lora_rank
+        self.runtime_lora_alpha = runtime_lora_alpha
         self.use_cache = use_cache
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)

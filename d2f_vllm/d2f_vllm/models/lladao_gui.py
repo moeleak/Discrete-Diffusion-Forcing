@@ -4,6 +4,7 @@ import os
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch import nn
 
 from d2f_vllm.layers.activation import SiluAndMul
@@ -23,6 +24,77 @@ if os.environ.get("TRITON_INTERPRET") == "1":
     torch.backends.optimized_mode = False
 
 
+class _ExactLoRAMixin:
+    def _init_exact_lora(
+        self,
+        rank: int,
+        alpha: float,
+        in_features: int,
+        out_features: int,
+    ) -> None:
+        if rank <= 0:
+            raise ValueError("exact runtime LoRA rank must be positive")
+        if self.tp_size != 1:
+            raise ValueError("exact LLaDA-o runtime LoRA currently requires TP=1")
+        self.lora_scale = float(alpha) / int(rank)
+        self.lora_A = nn.Parameter(
+            torch.empty(rank, in_features, dtype=torch.float32),
+            requires_grad=False,
+        )
+        self.lora_B = nn.Parameter(
+            torch.empty(out_features, rank, dtype=torch.float32),
+            requires_grad=False,
+        )
+
+    def _apply_exact_lora(
+        self, hidden_states: torch.Tensor, base_output: torch.Tensor
+    ) -> torch.Tensor:
+        lora_input = hidden_states.to(self.lora_A.dtype)
+        lora_hidden = F.linear(lora_input, self.lora_A)
+        lora_output = F.linear(lora_hidden, self.lora_B)
+        return (base_output + lora_output * self.lora_scale).to(base_output.dtype)
+
+
+class _ExactLoRAColumnParallelLinear(_ExactLoRAMixin, ColumnParallelLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        rank: int,
+        alpha: float,
+        bias: bool = False,
+    ) -> None:
+        super().__init__(input_size, output_size, bias=bias)
+        self._init_exact_lora(
+            rank, alpha, self.input_size, self.output_size_per_partition
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        base_output = F.linear(hidden_states, self.weight, self.bias)
+        return self._apply_exact_lora(hidden_states, base_output)
+
+
+class _ExactLoRARowParallelLinear(_ExactLoRAMixin, RowParallelLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        rank: int,
+        alpha: float,
+        bias: bool = False,
+    ) -> None:
+        super().__init__(input_size, output_size, bias=bias)
+        self._init_exact_lora(
+            rank, alpha, self.input_size_per_partition, self.output_size
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        base_output = F.linear(hidden_states, self.weight, self.bias)
+        return self._apply_exact_lora(hidden_states, base_output)
+
+
 class LLaDAOGuiAttention(nn.Module):
     def __init__(self, config: LLaDAOGuiConfig) -> None:
         super().__init__()
@@ -36,19 +108,40 @@ class LLaDAOGuiAttention(nn.Module):
         self.head_dim = config.hidden_size // self.total_num_heads
         self.scaling = self.head_dim**-0.5
         bias = bool(config.attention_bias)
+        lora_rank = int(config.runtime_lora_rank)
+        if lora_rank:
+            def projection(output_size: int) -> _ExactLoRAColumnParallelLinear:
+                return _ExactLoRAColumnParallelLinear(
+                    config.hidden_size,
+                    output_size,
+                    rank=lora_rank,
+                    alpha=float(config.runtime_lora_alpha),
+                    bias=bias,
+                )
 
-        self.q_proj = ColumnParallelLinear(
-            config.hidden_size, self.total_num_heads * self.head_dim, bias=bias
-        )
-        self.k_proj = ColumnParallelLinear(
-            config.hidden_size, self.total_num_kv_heads * self.head_dim, bias=bias
-        )
-        self.v_proj = ColumnParallelLinear(
-            config.hidden_size, self.total_num_kv_heads * self.head_dim, bias=bias
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim, config.hidden_size, bias=False
-        )
+            self.q_proj = projection(self.total_num_heads * self.head_dim)
+            self.k_proj = projection(self.total_num_kv_heads * self.head_dim)
+            self.v_proj = projection(self.total_num_kv_heads * self.head_dim)
+            self.o_proj = _ExactLoRARowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                config.hidden_size,
+                rank=lora_rank,
+                alpha=float(config.runtime_lora_alpha),
+                bias=False,
+            )
+        else:
+            self.q_proj = ColumnParallelLinear(
+                config.hidden_size, self.total_num_heads * self.head_dim, bias=bias
+            )
+            self.k_proj = ColumnParallelLinear(
+                config.hidden_size, self.total_num_kv_heads * self.head_dim, bias=bias
+            )
+            self.v_proj = ColumnParallelLinear(
+                config.hidden_size, self.total_num_kv_heads * self.head_dim, bias=bias
+            )
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim, config.hidden_size, bias=False
+            )
         if not config.qk_norm:
             raise ValueError("the GUI-grounding LLaDA-o checkpoint requires qk_norm=True")
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)

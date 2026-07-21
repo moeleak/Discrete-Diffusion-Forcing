@@ -1,5 +1,34 @@
 import pytest
 import torch
+import torch.nn.functional as F
+
+
+def test_exact_runtime_lora_matches_peft_inference_arithmetic():
+    from d2f_vllm.models.lladao_gui import _ExactLoRAMixin
+
+    class ExactLoRAForTest(_ExactLoRAMixin, torch.nn.Module):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self.tp_size = 1
+            self._init_exact_lora(2, 2.0, 4, 3)
+
+    module = ExactLoRAForTest()
+    module.lora_A.data.copy_(
+        torch.tensor([[0.5, -0.25, 0.125, 0.75], [-0.5, 0.25, 0.5, -0.125]])
+    )
+    module.lora_B.data.copy_(
+        torch.tensor([[0.25, -0.5], [0.75, 0.125], [-0.25, 0.5]])
+    )
+    hidden = torch.tensor(
+        [[0.5, -0.25, 1.0, 0.125]], dtype=torch.bfloat16
+    )
+    base_output = torch.tensor(
+        [[0.25, -0.5, 0.75]], dtype=torch.bfloat16
+    )
+    delta = F.linear(F.linear(hidden.float(), module.lora_A), module.lora_B)
+    expected = (base_output + delta).to(torch.bfloat16)
+    actual = module._apply_exact_lora(hidden, base_output)
+    assert torch.equal(actual, expected)
 
 
 def test_lladao_residual_norm_rounds_before_normalizing():

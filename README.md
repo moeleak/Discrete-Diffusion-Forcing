@@ -357,16 +357,20 @@ separate output directories, score each directory with
 `eval/gui_grounding/score_benchmark.py`, then enforce the paired quality and
 latency gates with `D2F-eval/compare_lladao_gui.py`.
 
-For the merged native d2f_vllm Non-PD runtime on `mllm`, use:
+For the native d2f_vllm Non-PD runtime on `mllm`, use:
 
 ```shell
 LIMIT=100 GPU=0 bash \
   /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/d2f_vllm/mllm_lladao_gui_nonpd.sh
 ```
 
-The default merged model is
-`/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377`; predictions,
-scores, and the full stdout/stderr log stay below
+The default converted model is
+`/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377-exact`. It
+stores the base projections plus the 128 trained FP32 low-rank residuals, so
+the native runtime matches PEFT inference without importing PEFT. A smaller
+BF16 weight-merged artifact can be produced with the converter's
+`--merge-lora` option, but that form is not numerically equivalent and should
+not be used for the quality gate. Predictions, scores, and the full log stay below
 `/home/ma-user/work/LLaDA-o/{results,logs}`.
 
 ```shell
