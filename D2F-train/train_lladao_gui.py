@@ -31,6 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from lladao_d2f.modeling import LLaDAOGuiD2FModel, add_lladao_repo, add_lora, load_base_model
+from lladao_d2f.training import (
+    advance_scheduler_for_optimizer_update,
+    validate_scheduler_global_step,
+)
 
 
 def as_namespace(value):
@@ -218,6 +222,7 @@ def main() -> None:
     warmup_steps = max(1, round(max_steps * float(config.train.warmup_ratio)))
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, max_steps)
     step = 0
+    validate_scheduler_global_step(scheduler, step)
     if args.resume_from is not None:
         step = restore_checkpoint(
             peft_model,
@@ -225,6 +230,7 @@ def main() -> None:
             scheduler,
             args.resume_from,
         )
+        validate_scheduler_global_step(scheduler, step)
         if step >= max_steps:
             raise ValueError(f"resume step {step} must be less than max steps {max_steps}")
         if step >= stop_after_step:
@@ -250,7 +256,11 @@ def main() -> None:
         kwargs_handlers=[ddp, process_group],
     )
     loader = build_loader(config, tokenizer, special_tokens, accelerator)
-    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    # Keep the scheduler outside Accelerate. AcceleratedScheduler compensates
+    # for non-split distributed batches by stepping once per process, but this
+    # job defines max_steps in global optimizer updates and partitions its
+    # iterable dataset explicitly by rank.
+    model, optimizer = accelerator.prepare(model, optimizer)
     model.train()
 
     iterator = iter(loader)
@@ -295,17 +305,23 @@ def main() -> None:
                 packed = next(iterator)
             batch = packed.cuda(accelerator.device).to_dict()
             batch.pop("batch_data_indexes", None)
+            optimizer_updated = False
             with accelerator.accumulate(model):
                 metrics = model(batch)
                 accelerator.backward(metrics["loss"])
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(trainable, float(config.train.max_grad_norm))
                 optimizer.step()
-                scheduler.step()
+                optimizer_updated = advance_scheduler_for_optimizer_update(
+                    scheduler,
+                    sync_gradients=accelerator.sync_gradients,
+                    optimizer_step_was_skipped=accelerator.optimizer_step_was_skipped,
+                )
                 optimizer.zero_grad(set_to_none=True)
-            if not accelerator.sync_gradients:
+            if not optimizer_updated:
                 continue
             step += 1
+            validate_scheduler_global_step(scheduler, step)
             reduced = {
                 key: accelerator.gather(value.detach().reshape(1)).float().mean().item()
                 for key, value in metrics.items()
