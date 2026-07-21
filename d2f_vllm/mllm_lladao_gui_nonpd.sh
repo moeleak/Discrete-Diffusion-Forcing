@@ -44,12 +44,14 @@ echo "[$(date '+%F %T')] LLaDA-o GUI Non-PD: gpu=$GPU limit=$LIMIT model=$RUNTIM
   --fail-fast \
   2>&1 | tee -a "$LOG"
 
-"$PYTHON" "$LLADAO_REPO/eval/gui_grounding/score_benchmark.py" \
-  --benchmark-root "$BENCHMARK_ROOT" \
-  --predictions-dir "$OUTPUT_DIR" \
-  --output-dir "$OUTPUT_DIR/scores" \
-  --benchmarks mind2web \
-  --limit "$LIMIT" \
-  2>&1 | tee -a "$LOG"
+(
+  cd "$LLADAO_REPO"
+  "$PYTHON" eval/gui_grounding/score_benchmark.py \
+    --benchmark-root "$BENCHMARK_ROOT" \
+    --predictions-dir "$OUTPUT_DIR" \
+    --output-dir "$OUTPUT_DIR/scores" \
+    --benchmarks mind2web \
+    --limit "$LIMIT"
+) 2>&1 | tee -a "$LOG"
 
 echo "[$(date '+%F %T')] LLADAO_GUI_NONPD_DONE output=$OUTPUT_DIR log=$LOG" | tee -a "$LOG"
