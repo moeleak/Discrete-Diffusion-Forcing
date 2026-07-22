@@ -373,11 +373,22 @@ Vision KV compression is enabled by default in the launcher. During the normal
 prompt prefill, the runtime scores the real ViT keys against the text queries,
 selects two-dimensional patch tiles, and compacts every layer and KV head in
 place. The vision boundary tokens and complete text prompt are always retained.
+The validated defaults select at most 20 tiles, keep 75% of the vision tokens,
+and score with the final four language layers.
 Use `KV_CACHE_COMPRESSION=0` for the dense baseline, or tune
 `VISION_TOPK_TILES`, `VISION_TOKEN_KEEP_RATIO`, `VISION_SCORE_LAYERS`, and
 `VISION_SCORE_QUERY_WINDOW` for an A/B run. Each prediction records the dense
 and active prefix lengths, compression ratio, tile counts, and compression
 latency.
+
+On the 100-sample Mind2Web gate, both dense and compressed modes score 80% SSR,
+100% action F1, and 100% parse rate. Compression reduces the average active
+prefix from 4,880 to 3,663 tokens (75.06%), returning about 609 MiB of logical
+KV pages per request to the allocator for this 32-layer, 32-KV-head model. For
+the short 64-token benchmark response, selection and compaction are not fully
+amortized: decode is 0.35% faster, while end-to-end latency increases from
+1.176 s to 1.232 s. Disable compression when minimum single-request latency is
+more important than cache capacity or longer-context decode cost.
 
 The default converted model is
 `/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377-exact`. It

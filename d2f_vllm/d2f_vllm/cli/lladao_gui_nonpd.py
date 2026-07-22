@@ -34,14 +34,14 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument("--vision-tile-size", type=int, default=16)
-    parser.add_argument("--vision-topk-tiles", type=int, default=0)
+    parser.add_argument("--vision-topk-tiles", type=int, default=20)
     parser.add_argument("--vision-token-keep-ratio", type=float, default=0.75)
     parser.add_argument("--vision-score-query-window", type=int, default=32)
-    parser.add_argument("--vision-score-layers", type=int, default=0)
+    parser.add_argument("--vision-score-layers", type=int, default=4)
     parser.add_argument(
         "--vision-score-layer-mode",
         choices=("all", "first", "last"),
-        default="all",
+        default="last",
     )
     parser.add_argument("--vision-score-pool-kernel", type=int, default=7)
     return parser.parse_args()

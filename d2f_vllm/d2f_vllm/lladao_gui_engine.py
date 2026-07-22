@@ -29,11 +29,11 @@ from d2f_vllm.utils.context import (
 class LLaDAOGuiKVCompressionConfig:
     enabled: bool = False
     vision_tile_size: int = 16
-    vision_topk_tiles: int = 0
+    vision_topk_tiles: int = 20
     vision_token_keep_ratio: float = 0.75
     vision_score_query_window: int = 32
-    vision_score_layers: int = 0
-    vision_score_layer_mode: str = "all"
+    vision_score_layers: int = 4
+    vision_score_layer_mode: str = "last"
     vision_score_pool_kernel: int = 7
 
     def __post_init__(self) -> None:
