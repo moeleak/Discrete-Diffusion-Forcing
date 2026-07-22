@@ -90,6 +90,50 @@ def test_generation_attention_mask_rejects_partial_blocks():
         build_generation_attention_mask(3, 6, 4, device=torch.device("cpu"))
 
 
+def test_vision_tiles_preserve_two_dimensional_regions():
+    from d2f_vllm.lladao_gui_engine import build_vision_tiles
+
+    tiles = build_vision_tiles(3, 5, 2)
+    assert tiles == [
+        [0, 1, 5, 6],
+        [2, 3, 7, 8],
+        [4, 9],
+        [10, 11],
+        [12, 13],
+        [14],
+    ]
+
+
+def test_vision_tile_selection_uses_peak_patch_attention():
+    from d2f_vllm.lladao_gui_engine import select_top_vision_tiles
+
+    scores = torch.tensor([0.1, 0.2, 0.3, 0.9, 0.4, 0.5])
+    tiles = [[0, 1], [2, 3], [4, 5]]
+    assert select_top_vision_tiles(scores, tiles, 1) == [1]
+    assert select_top_vision_tiles(scores, tiles, 0) == [0, 1, 2]
+
+
+def test_patch_eviction_selects_tokens_per_kv_head():
+    from d2f_vllm.lladao_gui_engine import select_patch_tokens_per_head
+
+    scores = torch.tensor(
+        [
+            [0.1, 0.8, 0.7, 0.2],
+            [0.9, 0.1, 0.2, 0.8],
+        ]
+    )
+    candidates = torch.tensor([0, 1, 2, 3])
+    selected = select_patch_tokens_per_head(scores, candidates, 2)
+    assert torch.equal(selected, torch.tensor([[1, 2], [0, 3]]))
+
+
+def test_kv_compression_config_rejects_even_pool_kernel():
+    from d2f_vllm.lladao_gui_engine import LLaDAOGuiKVCompressionConfig
+
+    with pytest.raises(ValueError, match="positive odd"):
+        LLaDAOGuiKVCompressionConfig(vision_score_pool_kernel=4)
+
+
 def test_sdpa_mask_is_cached_on_the_decode_context():
     from d2f_vllm.layers.attention.attention_v4 import Attention
     from d2f_vllm.utils.context import ContextForDiffusionLM

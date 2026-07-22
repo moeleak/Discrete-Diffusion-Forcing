@@ -87,6 +87,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rms-norm-backend", choices=("torch", "vllm"), default="torch"
     )
+    parser.add_argument(
+        "--kv-cache-compression",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--vision-tile-size", type=int, default=16)
+    parser.add_argument("--vision-topk-tiles", type=int, default=0)
+    parser.add_argument("--vision-token-keep-ratio", type=float, default=0.75)
+    parser.add_argument("--vision-score-query-window", type=int, default=32)
+    parser.add_argument("--vision-score-layers", type=int, default=0)
+    parser.add_argument(
+        "--vision-score-layer-mode",
+        choices=("all", "first", "last"),
+        default="all",
+    )
+    parser.add_argument("--vision-score-pool-kernel", type=int, default=7)
     parser.add_argument("--flush-every", type=int, default=1)
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
@@ -240,6 +256,12 @@ def model_generate(
         "prompt_cache_seconds": output.prompt_seconds,
         "generation_seconds": output.generation_seconds,
         "total_seconds": output.total_seconds,
+        "dense_prefix_tokens": output.dense_prefix_tokens,
+        "cached_prefix_tokens": output.cached_prefix_tokens,
+        "kv_cache_compression_ratio": output.kv_cache_compression_ratio,
+        "kv_cache_compression_seconds": output.kv_cache_compression_seconds,
+        "vision_tiles": output.vision_tiles,
+        "vision_selected_tiles": output.vision_selected_tiles,
         "iterations": output.n_diff_steps,
         "trace": output.trace,
     }
@@ -285,6 +307,14 @@ def infer_one(
         "image_cache_seconds": result["image_cache_seconds"],
         "prompt_cache_seconds": result["prompt_cache_seconds"],
         "generation_seconds": result["generation_seconds"],
+        "dense_prefix_tokens": result.get("dense_prefix_tokens"),
+        "cached_prefix_tokens": result.get("cached_prefix_tokens"),
+        "kv_cache_compression_ratio": result.get("kv_cache_compression_ratio"),
+        "kv_cache_compression_seconds": result.get(
+            "kv_cache_compression_seconds"
+        ),
+        "vision_tiles": result.get("vision_tiles"),
+        "vision_selected_tiles": result.get("vision_selected_tiles"),
         "convergence_steps": result["iterations"],
         "valid_tokens": len(result["tokens"]),
         "generated_tokens": args.max_new_tokens,
@@ -314,6 +344,12 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "image_cache_seconds": None,
         "prompt_cache_seconds": None,
         "generation_seconds": None,
+        "dense_prefix_tokens": None,
+        "cached_prefix_tokens": None,
+        "kv_cache_compression_ratio": None,
+        "kv_cache_compression_seconds": None,
+        "vision_tiles": None,
+        "vision_selected_tiles": None,
         "convergence_steps": None,
         "valid_tokens": None,
         "generated_tokens": None,
@@ -353,6 +389,14 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "max_model_len": args.max_model_len,
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
+        "kv_cache_compression": args.kv_cache_compression,
+        "vision_tile_size": args.vision_tile_size,
+        "vision_topk_tiles": args.vision_topk_tiles,
+        "vision_token_keep_ratio": args.vision_token_keep_ratio,
+        "vision_score_query_window": args.vision_score_query_window,
+        "vision_score_layers": args.vision_score_layers,
+        "vision_score_layer_mode": args.vision_score_layer_mode,
+        "vision_score_pool_kernel": args.vision_score_pool_kernel,
         "seed": args.seed,
         "sample_seed_policy": "sha256(base_seed, provenance.action_uid || sample_id)",
         "latency_scope": "synchronized image decode, preprocessing, cache construction, and generation",
@@ -379,7 +423,10 @@ def main() -> None:
     if args.backend == "d2f_vllm":
         os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend
         os.environ["D2F_VLLM_RMS_NORM_BACKEND"] = args.rms_norm_backend
-        from d2f_vllm.lladao_gui_engine import LLaDAOGuiD2FEngine
+        from d2f_vllm.lladao_gui_engine import (
+            LLaDAOGuiD2FEngine,
+            LLaDAOGuiKVCompressionConfig,
+        )
 
         engine = LLaDAOGuiD2FEngine(
             args.runtime_model,
@@ -391,6 +438,16 @@ def main() -> None:
             skip_threshold=args.skip_threshold,
             temperature=args.temperature,
             master_port=args.master_port,
+            kv_compression=LLaDAOGuiKVCompressionConfig(
+                enabled=args.kv_cache_compression,
+                vision_tile_size=args.vision_tile_size,
+                vision_topk_tiles=args.vision_topk_tiles,
+                vision_token_keep_ratio=args.vision_token_keep_ratio,
+                vision_score_query_window=args.vision_score_query_window,
+                vision_score_layers=args.vision_score_layers,
+                vision_score_layer_mode=args.vision_score_layer_mode,
+                vision_score_pool_kernel=args.vision_score_pool_kernel,
+            ),
         )
     else:
         engine = LLaDAOGuiD2FInference(

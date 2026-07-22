@@ -436,6 +436,7 @@ class FastDLLMDreamEngine:
         all_page_ids: List[int],
         start_token: int,
         valid_tokens: Optional[int] = None,
+        query_capture: Optional[Dict[int, torch.Tensor]] = None,
     ) -> torch.Tensor:
         if len(ids) != len(positions):
             raise ValueError(f"ids/positions length mismatch: {len(ids)} vs {len(positions)}")
@@ -465,6 +466,7 @@ class FastDLLMDreamEngine:
             kv_cache_layout=self.config.kv_cache_layout,
             need_kv_cache_store=True,
             full_attention=valid_tokens is None or int(valid_tokens) >= active_len,
+            query_capture=query_capture,
         )
         try:
             hidden = self.model(input_ids, self._positions_tensor(positions))

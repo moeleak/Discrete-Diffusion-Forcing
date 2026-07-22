@@ -181,6 +181,8 @@ class LLaDAOGuiPrefix:
     image_ids: list[int]
     image_positions: list[int]
     image_embeddings: torch.Tensor
+    image_grid_height: int
+    image_grid_width: int
     prompt_ids: list[int]
     prompt_positions: list[int]
 
@@ -287,7 +289,9 @@ class LLaDAOGuiPrefixEncoder:
             antialias=True,
         )
 
-    def _patchify(self, image: Image.Image) -> tuple[torch.Tensor, torch.Tensor]:
+    def _patchify(
+        self, image: Image.Image
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
         image = self._resize(image.convert("RGB"))
         tensor = tv_functional.pil_to_tensor(image).float().div_(255.0)
         tensor = tensor.sub_(0.5).div_(0.5)
@@ -302,11 +306,11 @@ class LLaDAOGuiPrefixEncoder:
         rows = torch.arange(height // patch)
         columns = torch.arange(width // patch)
         positions = (rows[:, None] * 70 + columns).flatten()
-        return patches, positions
+        return patches, positions, height // patch, width // patch
 
     @torch.inference_mode()
     def encode(self, image: Image.Image, prompt: str) -> LLaDAOGuiPrefix:
-        patches, vision_positions = self._patchify(image)
+        patches, vision_positions, grid_height, grid_width = self._patchify(image)
         patches = patches.to(device=self.device, dtype=self.dtype)
         vision_positions = vision_positions.to(device=self.device)
         vision = self.modules.vit_model(patches, vision_positions)
@@ -332,6 +336,8 @@ class LLaDAOGuiPrefixEncoder:
             image_ids=image_ids,
             image_positions=[0] * len(image_ids),
             image_embeddings=image_embeddings,
+            image_grid_height=grid_height,
+            image_grid_width=grid_width,
             prompt_ids=prompt_ids,
             prompt_positions=list(range(1, 1 + len(prompt_ids))),
         )

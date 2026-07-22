@@ -323,8 +323,8 @@ The results will be saved in the `output_path` specified within the shell script
 #### LLaDA-o GUI-grounding backend
 
 This fork also contains a multimodal D2F backend for the LLaDA-o GUI model. It
-keeps the original image and prompt KV cache, applies block-causal attention to
-the answer, and stores the D2F adaptation as a small LoRA checkpoint. It needs
+applies block-causal attention to the answer, supports query-aware vision KV
+compression, and stores the D2F adaptation as a small LoRA checkpoint. It needs
 the companion `LLaDA-o-d2f-support` checkout because upstream LLaDA-o does not
 expose additive attention bias during cached inference.
 
@@ -368,6 +368,16 @@ The launcher uses vLLM's fused CUDA RMSNorm by default. It keeps BF16 inputs
 and FP32 accumulation, and the 100-sample paired gate retains 80% SSR and 100%
 action F1. Set `D2F_VLLM_RMS_NORM_BACKEND=torch` to reproduce the unfused
 PyTorch reduction order when investigating individual-token differences.
+
+Vision KV compression is enabled by default in the launcher. During the normal
+prompt prefill, the runtime scores the real ViT keys against the text queries,
+selects two-dimensional patch tiles, and compacts every layer and KV head in
+place. The vision boundary tokens and complete text prompt are always retained.
+Use `KV_CACHE_COMPRESSION=0` for the dense baseline, or tune
+`VISION_TOPK_TILES`, `VISION_TOKEN_KEEP_RATIO`, `VISION_SCORE_LAYERS`, and
+`VISION_SCORE_QUERY_WINDOW` for an A/B run. Each prediction records the dense
+and active prefix lengths, compression ratio, tile counts, and compression
+latency.
 
 The default converted model is
 `/home/ma-user/work/LLaDA-o/models/lladao-gui-d2f-vllm-step1377-exact`. It

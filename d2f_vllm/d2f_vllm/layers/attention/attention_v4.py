@@ -230,6 +230,8 @@ class Attention(nn.Module):
         v = v.view(-1, self.num_kv_heads, self.head_dim)
 
         context: ContextForDiffusionLM = get_context_causal_lm() if self.model_type == 'causal_lm' else get_context_diffusion_lm()
+        if getattr(context, "query_capture", None) is not None and self.layer_idx >= 0:
+            context.query_capture[self.layer_idx] = q.detach()
         k_cache, v_cache = self.k_cache, self.v_cache
         is_unified_layout = context.kv_cache_layout == "unified"
 
