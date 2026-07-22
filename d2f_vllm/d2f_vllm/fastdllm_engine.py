@@ -581,23 +581,48 @@ class FastDLLMDreamEngine:
         if active_len <= 0:
             return 0
 
+        num_layers = int(kv_cache.shape[1])
+        if len(keep_indices_per_layer_per_head) != num_layers:
+            raise ValueError(
+                "per-head KV compaction layer count mismatch: "
+                f"got {len(keep_indices_per_layer_per_head)}, expected {num_layers}"
+            )
+        keep_stack = torch.stack(
+            [
+                keep.to(device=torch.cuda.current_device(), dtype=torch.long)
+                for keep in keep_indices_per_layer_per_head
+            ]
+        )
+        if any(int(keep.shape[1]) != active_len for keep in keep_stack):
+            raise ValueError("per-head KV compaction requires one active length")
+
         dst_token_idx = torch.arange(active_len, dtype=torch.long, device=torch.cuda.current_device())
         dst_pages = page_ids.index_select(0, dst_token_idx // self.page_size)
         dst_offsets = dst_token_idx % self.page_size
 
-        for layer_idx, keep in enumerate(keep_indices_per_layer_per_head):
-            layer_cache = kv_cache[:, layer_idx]
+        layer_batch_size = 4
+        for layer_start in range(0, num_layers, layer_batch_size):
+            layer_end = min(layer_start + layer_batch_size, num_layers)
+            keep = keep_stack[layer_start:layer_end]
             src_pages = page_ids.index_select(
                 0, (keep // self.page_size).reshape(-1)
             ).reshape_as(keep)
             src_offsets = keep % self.page_size
+            layer_indices = torch.arange(
+                layer_start,
+                layer_end,
+                device=keep.device,
+                dtype=torch.long,
+            ).view(-1, 1, 1).expand_as(keep)
             head_indices = torch.arange(
-                keep.shape[0], device=keep.device, dtype=torch.long
-            ).view(-1, 1).expand_as(keep)
-            compacted = layer_cache[
-                :, src_pages, src_offsets, head_indices, :
-            ].clone().permute(0, 2, 1, 3)
-            layer_cache[:, dst_pages, dst_offsets, :, :] = compacted
+                keep.shape[1], device=keep.device, dtype=torch.long
+            ).view(1, -1, 1).expand_as(keep)
+            compacted = kv_cache[
+                :, layer_indices, src_pages, src_offsets, head_indices, :
+            ].clone().permute(0, 1, 3, 2, 4)
+            kv_cache[
+                :, layer_start:layer_end, dst_pages, dst_offsets, :, :
+            ] = compacted
         return active_len
 
     def _snapshot_prompt_cache_per_layer(
