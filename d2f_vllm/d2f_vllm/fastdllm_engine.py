@@ -501,12 +501,18 @@ class FastDLLMDreamEngine:
             layer_cache = kv_cache[:, layer_idx]
             if int(keep.shape[1]) != keep_count:
                 raise ValueError(f"Layer {layer_idx} keep_count mismatch in chunk-local KV copy")
-            for head_idx in range(int(keep.shape[0])):
-                src_token_idx = keep[head_idx] + int(src_chunk_start)
-                src_pages_for_head = src_pages.index_select(0, src_token_idx // self.page_size)
-                src_offsets = src_token_idx % self.page_size
-                gathered = layer_cache[:, src_pages_for_head, src_offsets, head_idx, :].clone()
-                layer_cache[:, dst_pages, dst_offsets, head_idx, :] = gathered
+            src_token_idx = keep + int(src_chunk_start)
+            src_pages_for_head = src_pages.index_select(
+                0, (src_token_idx // self.page_size).reshape(-1)
+            ).reshape_as(src_token_idx)
+            src_offsets = src_token_idx % self.page_size
+            head_indices = torch.arange(
+                keep.shape[0], device=keep.device, dtype=torch.long
+            ).view(-1, 1).expand_as(keep)
+            gathered = layer_cache[
+                :, src_pages_for_head, src_offsets, head_indices, :
+            ].clone().permute(0, 2, 1, 3)
+            layer_cache[:, dst_pages, dst_offsets, :, :] = gathered
         return keep_count
 
     def _normalize_per_head_keep_indices(
@@ -581,12 +587,17 @@ class FastDLLMDreamEngine:
 
         for layer_idx, keep in enumerate(keep_indices_per_layer_per_head):
             layer_cache = kv_cache[:, layer_idx]
-            for head_idx in range(int(keep.shape[0])):
-                src_token_idx = keep[head_idx]
-                src_pages = page_ids.index_select(0, src_token_idx // self.page_size)
-                src_offsets = src_token_idx % self.page_size
-                compacted = layer_cache[:, src_pages, src_offsets, head_idx, :].clone()
-                layer_cache[:, dst_pages, dst_offsets, head_idx, :] = compacted
+            src_pages = page_ids.index_select(
+                0, (keep // self.page_size).reshape(-1)
+            ).reshape_as(keep)
+            src_offsets = keep % self.page_size
+            head_indices = torch.arange(
+                keep.shape[0], device=keep.device, dtype=torch.long
+            ).view(-1, 1).expand_as(keep)
+            compacted = layer_cache[
+                :, src_pages, src_offsets, head_indices, :
+            ].clone().permute(0, 2, 1, 3)
+            layer_cache[:, dst_pages, dst_offsets, :, :] = compacted
         return active_len
 
     def _snapshot_prompt_cache_per_layer(
