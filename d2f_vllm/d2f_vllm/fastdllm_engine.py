@@ -156,6 +156,8 @@ class FastDLLMDreamEngine:
         model_name: str = "dream",
         num_kvcache_blocks: int = -1,
         skip_model_warmup: bool = False,
+        rope_scaling_override: dict | None = None,
+        allow_unscaled_max_model_len: bool = False,
     ) -> None:
         self.block_length = int(block_length)
         self.mask_token_id = int(mask_token_id)
@@ -181,6 +183,8 @@ class FastDLLMDreamEngine:
             shm_name=shm_name,
             num_kvcache_blocks=num_kvcache_blocks,
             skip_model_warmup=skip_model_warmup,
+            rope_scaling_override=rope_scaling_override,
+            allow_unscaled_max_model_len=allow_unscaled_max_model_len,
         )
         if cfg.kv_cache_layout not in ("unified", "distinct"):
             raise ValueError(f"FastDLLMDreamEngine supports kv_cache_layout='unified' or 'distinct', got '{cfg.kv_cache_layout}'.")

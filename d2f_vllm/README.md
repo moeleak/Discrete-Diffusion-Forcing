@@ -84,3 +84,37 @@ In contrast, setting `add_new_block_threshold=1.0` allows compatibility with Fas
 - [ ] Implement Async Engine and Streaming Generation
 - [ ] Faster Flash Attention Kernel
 - [ ] Diffusion LM CUDA Graph Capturing
+
+## LLaDA-o GUI long-context benchmark
+
+The native GUI Non-PD path supports a reproducible 128K YaRN configuration
+without forcing the KV cache to reserve the full positional limit:
+
+```bash
+MODE=yarn \
+MAX_MODEL_LEN=131072 \
+KV_CACHE_CAPACITY=65536 \
+bash d2f_vllm/mllm_lladao_gui_long_context.sh
+```
+
+`MAX_MODEL_LEN` is the positional limit. `KV_CACHE_CAPACITY` is the maximum
+resident sequence length for the current process. The 16K-to-64K benchmark
+uses bf16 KV on one A800 and retains the checkpoint's original
+`rope_theta=500000`. YaRN uses factor 8 from the original 16,384-position
+window.
+
+Full-page Mind2Web screenshots are not resized or target-cropped. They are
+split into non-overlapping, row-major 980-pixel image tiles. Each tile receives
+independent bidirectional visual prefill, and the grounding prompt attends all
+tile KV in a single request. This avoids quadratic attention across unrelated
+tiles while preserving the complete page context.
+
+Run the unscaled/YaRN comparison concurrently on two GPUs:
+
+```bash
+nohup bash d2f_vllm/mllm_lladao_gui_yarn_ab.sh \
+  > /home/ma-user/work/LLaDA-o/logs/yarn-ab-nohup.log 2>&1 &
+```
+
+The launcher is append-only and resumable. It writes per-run scores plus
+`results/d2f-vllm-fullpage-comparison/{comparison.json,comparison.csv,comparison.md}`.

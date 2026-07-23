@@ -45,6 +45,8 @@ class Config:
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
     skip_model_warmup: bool = False
+    rope_scaling_override: dict | None = None
+    allow_unscaled_max_model_len: bool = False
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
@@ -65,5 +67,29 @@ class Config:
             self.hf_config = LLaDAOGuiConfig.from_pretrained(self.model)
         else:
             self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
-        self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
+        checkpoint_max_position = int(self.hf_config.max_position_embeddings)
+        if self.rope_scaling_override is not None:
+            scaling = dict(self.rope_scaling_override)
+            scaling.setdefault(
+                "original_max_position_embeddings", checkpoint_max_position
+            )
+            self.hf_config.rope_scaling = scaling
+            self.hf_config.original_max_position_embeddings = int(
+                scaling["original_max_position_embeddings"]
+            )
+            self.hf_config.max_position_embeddings = max(
+                checkpoint_max_position, self.max_model_len
+            )
+        elif self.allow_unscaled_max_model_len:
+            self.hf_config.rope_scaling = None
+            self.hf_config.original_max_position_embeddings = (
+                checkpoint_max_position
+            )
+            self.hf_config.max_position_embeddings = max(
+                checkpoint_max_position, self.max_model_len
+            )
+        else:
+            self.max_model_len = min(
+                self.max_model_len, checkpoint_max_position
+            )
         assert self.max_num_batched_tokens >= self.max_model_len

@@ -176,19 +176,57 @@ class _VisionPrefixModules(nn.Module):
         self.vit_pos_embed = _PositionEmbedding(70**2, language_hidden_size)
 
 
+@dataclass(frozen=True)
+class LLaDAOGuiImageSpan:
+    token_start: int
+    patch_start: int
+    patch_end: int
+    token_end: int
+    grid_height: int
+    grid_width: int
+    source_box: tuple[int, int, int, int]
+
+    @property
+    def patch_count(self) -> int:
+        return self.patch_end - self.patch_start
+
+
 @dataclass
 class LLaDAOGuiPrefix:
     image_ids: list[int]
     image_positions: list[int]
     image_embeddings: torch.Tensor
-    image_grid_height: int
-    image_grid_width: int
+    image_spans: list[LLaDAOGuiImageSpan]
+    source_width: int
+    source_height: int
     prompt_ids: list[int]
     prompt_positions: list[int]
 
     @property
     def length(self) -> int:
         return len(self.image_ids) + len(self.prompt_ids)
+
+    @property
+    def image_patch_count(self) -> int:
+        return sum(span.patch_count for span in self.image_spans)
+
+
+def full_page_tile_boxes(
+    width: int,
+    height: int,
+    tile_size: int = 980,
+) -> list[tuple[int, int, int, int]]:
+    """Split a screenshot into deterministic non-overlapping row-major tiles."""
+
+    if width <= 0 or height <= 0:
+        raise ValueError("full-page image dimensions must be positive")
+    if tile_size <= 0 or tile_size > 980:
+        raise ValueError("full-page tile_size must be in [1, 980]")
+    return [
+        (left, top, min(left + tile_size, width), min(top + tile_size, height))
+        for top in range(0, height, tile_size)
+        for left in range(0, width, tile_size)
+    ]
 
 
 class LLaDAOGuiPrefixEncoder:
@@ -293,10 +331,30 @@ class LLaDAOGuiPrefixEncoder:
         self, image: Image.Image
     ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
         image = self._resize(image.convert("RGB"))
+        return self._patchify_exact(image)
+
+    def _patchify_exact(
+        self, image: Image.Image
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+        """Patchify without resizing, padding only the right and bottom edges."""
+
         tensor = tv_functional.pil_to_tensor(image).float().div_(255.0)
         tensor = tensor.sub_(0.5).div_(0.5)
         channels, height, width = tensor.shape
         patch = self.patch_size
+        padded_height = ((height + patch - 1) // patch) * patch
+        padded_width = ((width + patch - 1) // patch) * patch
+        if padded_height > 980 or padded_width > 980:
+            raise ValueError(
+                "exact image tile exceeds the trained 70x70 ViT position grid"
+            )
+        if padded_height != height or padded_width != width:
+            tensor = F.pad(
+                tensor,
+                (0, padded_width - width, 0, padded_height - height),
+                value=0.0,
+            )
+            height, width = padded_height, padded_width
         tensor = tensor.reshape(
             channels, height // patch, patch, width // patch, patch
         )
@@ -308,36 +366,106 @@ class LLaDAOGuiPrefixEncoder:
         positions = (rows[:, None] * 70 + columns).flatten()
         return patches, positions, height // patch, width // patch
 
-    @torch.inference_mode()
-    def encode(self, image: Image.Image, prompt: str) -> LLaDAOGuiPrefix:
-        patches, vision_positions, grid_height, grid_width = self._patchify(image)
-        patches = patches.to(device=self.device, dtype=self.dtype)
-        vision_positions = vision_positions.to(device=self.device)
-        vision = self.modules.vit_model(patches, vision_positions)
-        vision = self.modules.connector(vision)
-        vision = vision + self.modules.vit_pos_embed(vision_positions)
-
+    def _encode_images(
+        self,
+        images: list[tuple[Image.Image, tuple[int, int, int, int]]],
+        prompt: str,
+        *,
+        resize: bool,
+        source_size: tuple[int, int],
+    ) -> LLaDAOGuiPrefix:
+        if not images:
+            raise ValueError("at least one image is required")
         boundary_ids = torch.tensor(
             [self.start_image_id, self.end_image_id],
             dtype=torch.long,
             device=self.device,
         )
         boundary = self.token_embedding(boundary_ids)
-        image_embeddings = torch.cat(
-            (boundary[:1], vision.to(boundary.dtype), boundary[1:]), dim=0
-        )
-        image_ids = [self.start_image_id] + [0] * vision.size(0) + [self.end_image_id]
+        image_ids: list[int] = []
+        image_positions: list[int] = []
+        image_embeddings: list[torch.Tensor] = []
+        image_spans: list[LLaDAOGuiImageSpan] = []
+        token_cursor = 0
+
+        for image_index, (image, source_box) in enumerate(images):
+            patchify = self._patchify if resize else self._patchify_exact
+            patches, vision_positions, grid_height, grid_width = patchify(
+                image.convert("RGB")
+            )
+            patches = patches.to(device=self.device, dtype=self.dtype)
+            vision_positions = vision_positions.to(device=self.device)
+            vision = self.modules.vit_model(patches, vision_positions)
+            vision = self.modules.connector(vision)
+            vision = vision + self.modules.vit_pos_embed(vision_positions)
+            encoded = torch.cat(
+                (boundary[:1], vision.to(boundary.dtype), boundary[1:]), dim=0
+            )
+            patch_count = int(vision.size(0))
+            span = LLaDAOGuiImageSpan(
+                token_start=token_cursor,
+                patch_start=token_cursor + 1,
+                patch_end=token_cursor + 1 + patch_count,
+                token_end=token_cursor + patch_count + 2,
+                grid_height=grid_height,
+                grid_width=grid_width,
+                source_box=source_box,
+            )
+            image_spans.append(span)
+            image_embeddings.append(encoded)
+            image_ids.extend(
+                [self.start_image_id] + [0] * patch_count + [self.end_image_id]
+            )
+            image_positions.extend([image_index] * (patch_count + 2))
+            token_cursor = span.token_end
+
         prompt_ids = [
             self.bos_token_id,
             *self.tokenizer.encode(prompt, add_special_tokens=False),
             self.eos_token_id,
         ]
+        prompt_position_start = len(images)
         return LLaDAOGuiPrefix(
             image_ids=image_ids,
-            image_positions=[0] * len(image_ids),
-            image_embeddings=image_embeddings,
-            image_grid_height=grid_height,
-            image_grid_width=grid_width,
+            image_positions=image_positions,
+            image_embeddings=torch.cat(image_embeddings, dim=0),
+            image_spans=image_spans,
+            source_width=int(source_size[0]),
+            source_height=int(source_size[1]),
             prompt_ids=prompt_ids,
-            prompt_positions=list(range(1, 1 + len(prompt_ids))),
+            prompt_positions=list(
+                range(
+                    prompt_position_start,
+                    prompt_position_start + len(prompt_ids),
+                )
+            ),
+        )
+
+    @torch.inference_mode()
+    def encode(self, image: Image.Image, prompt: str) -> LLaDAOGuiPrefix:
+        width, height = image.size
+        return self._encode_images(
+            [(image, (0, 0, width, height))],
+            prompt,
+            resize=True,
+            source_size=(width, height),
+        )
+
+    @torch.inference_mode()
+    def encode_full_page(
+        self,
+        image: Image.Image,
+        prompt: str,
+        *,
+        tile_size: int = 980,
+    ) -> LLaDAOGuiPrefix:
+        image = image.convert("RGB")
+        width, height = image.size
+        boxes = full_page_tile_boxes(width, height, tile_size)
+        images = [(image.crop(box), box) for box in boxes]
+        return self._encode_images(
+            images,
+            prompt,
+            resize=False,
+            source_size=(width, height),
         )

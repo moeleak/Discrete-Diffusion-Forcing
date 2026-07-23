@@ -80,6 +80,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-iterations", type=int, default=256)
     parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument("--kv-cache-capacity", type=int)
+    parser.add_argument(
+        "--rope-scaling", choices=("none", "yarn"), default="none"
+    )
+    parser.add_argument("--rope-factor", type=float, default=8.0)
+    parser.add_argument(
+        "--original-max-position-embeddings",
+        type=int,
+        default=16384,
+    )
+    parser.add_argument("--allow-unscaled-max-model-len", action="store_true")
+    parser.add_argument(
+        "--full-page-tiles",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument(
         "--attention-backend", choices=("sdpa", "flex"), default="sdpa"
@@ -119,6 +136,25 @@ def parse_args() -> argparse.Namespace:
         parser.error("D2F max-new-tokens must be divisible by block-size")
     if args.backend == "d2f_vllm" and args.runtime_model is None:
         parser.error("--runtime-model is required for d2f_vllm")
+    if args.kv_cache_capacity is not None:
+        if args.kv_cache_capacity <= 0:
+            parser.error("--kv-cache-capacity must be positive")
+        if args.kv_cache_capacity > args.max_model_len:
+            parser.error(
+                "--kv-cache-capacity cannot exceed --max-model-len"
+            )
+    if args.rope_scaling == "yarn" and args.rope_factor <= 1.0:
+        parser.error("--rope-factor must be greater than 1 for YaRN")
+    if (
+        args.max_model_len > args.original_max_position_embeddings
+        and args.rope_scaling == "none"
+        and not args.allow_unscaled_max_model_len
+        and args.backend == "d2f_vllm"
+    ):
+        parser.error(
+            "an extended unscaled run requires "
+            "--allow-unscaled-max-model-len"
+        )
     for name in (
         "block_add_threshold",
         "decoded_token_threshold",
@@ -222,6 +258,8 @@ def model_generate(
     image: Image.Image,
     prompt: str,
     args: argparse.Namespace,
+    *,
+    full_page: bool = False,
 ) -> dict[str, Any]:
     if args.backend == "baseline":
         return engine.generate_baseline(
@@ -248,6 +286,8 @@ def model_generate(
         prompt,
         max_new_tokens=args.max_new_tokens,
         max_iterations=args.max_iterations,
+        full_page=full_page,
+        full_page_tile_size=args.full_page_tile_size,
     )
     return {
         "raw_text": output.text,
@@ -262,6 +302,11 @@ def model_generate(
         "kv_cache_compression_seconds": output.kv_cache_compression_seconds,
         "vision_tiles": output.vision_tiles,
         "vision_selected_tiles": output.vision_selected_tiles,
+        "input_images": output.input_images,
+        "source_width": output.source_width,
+        "source_height": output.source_height,
+        "peak_memory_allocated_gib": output.peak_memory_allocated_gib,
+        "peak_memory_reserved_gib": output.peak_memory_reserved_gib,
         "iterations": output.n_diff_steps,
         "trace": output.trace,
     }
@@ -277,12 +322,36 @@ def infer_one(
 ) -> dict[str, Any]:
     inference_seed = paired_sample_seed(sample, args.seed)
     set_seed(inference_seed)
+    if args.backend == "d2f_vllm":
+        sequence = sample.get("sequence_tokens")
+        expected_total = (
+            sequence.get("total") if isinstance(sequence, dict) else None
+        )
+        capacity = args.kv_cache_capacity or args.max_model_len
+        if (
+            isinstance(expected_total, (int, float))
+            and expected_total > capacity
+        ):
+            raise ValueError(
+                f"prepared sequence length {int(expected_total)} exceeds "
+                f"kv_cache_capacity={capacity}"
+            )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     started = time.perf_counter()
     with Image.open(root / sample["image"]) as source:
         image = source.convert("RGB")
-        result = model_generate(engine, image, sample["prompt"], args)
+        full_page = bool(
+            args.full_page_tiles
+            or sample.get("input_protocol") == "full_page_tiles"
+        )
+        result = model_generate(
+            engine,
+            image,
+            sample["prompt"],
+            args,
+            full_page=full_page,
+        )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     latency = time.perf_counter() - started
@@ -315,6 +384,15 @@ def infer_one(
         ),
         "vision_tiles": result.get("vision_tiles"),
         "vision_selected_tiles": result.get("vision_selected_tiles"),
+        "input_images": result.get("input_images"),
+        "source_width": result.get("source_width"),
+        "source_height": result.get("source_height"),
+        "peak_memory_allocated_gib": result.get(
+            "peak_memory_allocated_gib"
+        ),
+        "peak_memory_reserved_gib": result.get(
+            "peak_memory_reserved_gib"
+        ),
         "convergence_steps": result["iterations"],
         "valid_tokens": len(result["tokens"]),
         "generated_tokens": args.max_new_tokens,
@@ -350,6 +428,11 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "kv_cache_compression_seconds": None,
         "vision_tiles": None,
         "vision_selected_tiles": None,
+        "input_images": None,
+        "source_width": None,
+        "source_height": None,
+        "peak_memory_allocated_gib": None,
+        "peak_memory_reserved_gib": None,
         "convergence_steps": None,
         "valid_tokens": None,
         "generated_tokens": None,
@@ -387,6 +470,17 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "skip_threshold": args.skip_threshold,
         "temperature": args.temperature,
         "max_model_len": args.max_model_len,
+        "kv_cache_capacity": args.kv_cache_capacity,
+        "rope_scaling": args.rope_scaling,
+        "rope_factor": args.rope_factor,
+        "original_max_position_embeddings": (
+            args.original_max_position_embeddings
+        ),
+        "allow_unscaled_max_model_len": (
+            args.allow_unscaled_max_model_len
+        ),
+        "full_page_tiles": args.full_page_tiles,
+        "full_page_tile_size": args.full_page_tile_size,
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
         "kv_cache_compression": args.kv_cache_compression,
@@ -428,6 +522,17 @@ def main() -> None:
             LLaDAOGuiKVCompressionConfig,
         )
 
+        rope_scaling = None
+        if args.rope_scaling == "yarn":
+            rope_scaling = {
+                "rope_type": "yarn",
+                "factor": args.rope_factor,
+                "original_max_position_embeddings": (
+                    args.original_max_position_embeddings
+                ),
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+            }
         engine = LLaDAOGuiD2FEngine(
             args.runtime_model,
             max_model_len=args.max_model_len,
@@ -438,6 +543,11 @@ def main() -> None:
             skip_threshold=args.skip_threshold,
             temperature=args.temperature,
             master_port=args.master_port,
+            kv_cache_capacity=args.kv_cache_capacity,
+            rope_scaling=rope_scaling,
+            allow_unscaled_max_model_len=(
+                args.allow_unscaled_max_model_len
+            ),
             kv_compression=LLaDAOGuiKVCompressionConfig(
                 enabled=args.kv_cache_compression,
                 vision_tile_size=args.vision_tile_size,

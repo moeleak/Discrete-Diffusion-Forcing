@@ -17,6 +17,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--max-model-len", type=int, default=16384)
+    parser.add_argument("--kv-cache-capacity", type=int)
+    parser.add_argument(
+        "--rope-scaling",
+        choices=("none", "yarn"),
+        default="none",
+    )
+    parser.add_argument("--rope-factor", type=float, default=8.0)
+    parser.add_argument(
+        "--original-max-position-embeddings",
+        type=int,
+        default=16384,
+    )
+    parser.add_argument(
+        "--allow-unscaled-max-model-len",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--full-page-tiles",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--block-length", type=int, default=16)
     parser.add_argument("--block-add-threshold", type=float, default=0.1)
@@ -49,12 +71,32 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if (
+        args.max_model_len > args.original_max_position_embeddings
+        and args.rope_scaling == "none"
+        and not args.allow_unscaled_max_model_len
+    ):
+        raise SystemExit(
+            "an extended unscaled run requires "
+            "--allow-unscaled-max-model-len"
+        )
     os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend
     os.environ["D2F_VLLM_RMS_NORM_BACKEND"] = args.rms_norm_backend
     from d2f_vllm.lladao_gui_engine import (
         LLaDAOGuiD2FEngine,
         LLaDAOGuiKVCompressionConfig,
     )
+    rope_scaling = None
+    if args.rope_scaling == "yarn":
+        rope_scaling = {
+            "rope_type": "yarn",
+            "factor": args.rope_factor,
+            "original_max_position_embeddings": (
+                args.original_max_position_embeddings
+            ),
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+        }
 
     engine = LLaDAOGuiD2FEngine(
         args.model,
@@ -66,6 +108,9 @@ def main() -> None:
         decoded_token_threshold=args.decoded_token_threshold,
         skip_threshold=args.skip_threshold,
         master_port=args.master_port,
+        kv_cache_capacity=args.kv_cache_capacity,
+        rope_scaling=rope_scaling,
+        allow_unscaled_max_model_len=args.allow_unscaled_max_model_len,
         kv_compression=LLaDAOGuiKVCompressionConfig(
             enabled=args.kv_cache_compression,
             vision_tile_size=args.vision_tile_size,
@@ -83,6 +128,8 @@ def main() -> None:
                 image.convert("RGB"),
                 args.prompt,
                 max_new_tokens=args.max_new_tokens,
+                full_page=args.full_page_tiles,
+                full_page_tile_size=args.full_page_tile_size,
             ).to_dict()
     finally:
         engine.close()

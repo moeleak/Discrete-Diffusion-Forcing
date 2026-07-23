@@ -16,6 +16,7 @@ from d2f_vllm.fastdllm_engine import (
     _StaticMaskSeq,
 )
 from d2f_vllm.multimodal.lladao_gui import (
+    LLaDAOGuiImageSpan,
     LLaDAOGuiPrefix,
     LLaDAOGuiPrefixEncoder,
 )
@@ -71,10 +72,15 @@ class LLaDAOGuiEngineOutput:
     kv_cache_compression_seconds: float
     vision_tiles: int
     vision_selected_tiles: int
+    input_images: int
+    source_width: int
+    source_height: int
     image_seconds: float
     prompt_seconds: float
     generation_seconds: float
     total_seconds: float
+    peak_memory_allocated_gib: float
+    peak_memory_reserved_gib: float
     trace: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
@@ -184,6 +190,9 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         gpu_memory_utilization: float = 0.75,
         master_port: int = 2333,
         kv_compression: LLaDAOGuiKVCompressionConfig | None = None,
+        kv_cache_capacity: int | None = None,
+        rope_scaling: dict | None = None,
+        allow_unscaled_max_model_len: bool = False,
     ) -> None:
         if max_new_tokens <= 0 or max_new_tokens % block_length:
             raise ValueError("max_new_tokens must be a positive block multiple")
@@ -196,7 +205,14 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             if kv_compression is not None
             else LLaDAOGuiKVCompressionConfig()
         )
-        page_count = math.ceil(max_model_len / 256) + 4
+        self.kv_cache_capacity = int(kv_cache_capacity or max_model_len)
+        if self.kv_cache_capacity <= 0:
+            raise ValueError("kv_cache_capacity must be positive")
+        if self.kv_cache_capacity > max_model_len:
+            raise ValueError(
+                "kv_cache_capacity cannot exceed max_model_len"
+            )
+        page_count = math.ceil(self.kv_cache_capacity / 256) + 4
         super().__init__(
             str(model),
             max_model_len=max_model_len,
@@ -214,6 +230,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             model_name="lladao_gui",
             num_kvcache_blocks=page_count,
             skip_model_warmup=True,
+            rope_scaling_override=rope_scaling,
+            allow_unscaled_max_model_len=allow_unscaled_max_model_len,
         )
         if self.config.tensor_parallel_size != 1:
             raise ValueError("LLaDA-o GUI Non-PD currently supports TP=1 only")
@@ -252,9 +270,9 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
     def _pool_vision_scores(
         self,
         scores: torch.Tensor,
-        prefix: LLaDAOGuiPrefix,
+        span: LLaDAOGuiImageSpan,
     ) -> torch.Tensor:
-        expected = prefix.image_grid_height * prefix.image_grid_width
+        expected = span.grid_height * span.grid_width
         if scores.shape[-1] != expected:
             raise ValueError(
                 f"vision score length mismatch: got {scores.shape[-1]}, "
@@ -268,8 +286,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             scores.reshape(
                 -1,
                 1,
-                prefix.image_grid_height,
-                prefix.image_grid_width,
+                span.grid_height,
+                span.grid_width,
             ),
             kernel_size=kernel,
             stride=1,
@@ -303,9 +321,6 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 query_start,
                 query_end - config.vision_score_query_window,
             )
-        patch_start = 1
-        patch_count = prefix.image_grid_height * prefix.image_grid_width
-        patch_end = patch_start + patch_count
         scores_by_layer: dict[int, torch.Tensor] = {}
 
         for layer_index in layer_indices:
@@ -343,13 +358,16 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             probabilities = torch.softmax(
                 logits * float(attention.scaling), dim=-1
             )
-            scores = (
-                probabilities[..., patch_start:patch_end]
-                .sum(dim=1)
-                .mean(dim=1)
-            )
-            scores_by_layer[layer_index] = self._pool_vision_scores(
-                scores, prefix
+            span_scores = []
+            for span in prefix.image_spans:
+                scores = (
+                    probabilities[..., span.patch_start : span.patch_end]
+                    .sum(dim=1)
+                    .mean(dim=1)
+                )
+                span_scores.append(self._pool_vision_scores(scores, span))
+            scores_by_layer[layer_index] = torch.cat(
+                span_scores, dim=-1
             )
         return scores_by_layer
 
@@ -359,8 +377,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         scores_by_layer: dict[int, torch.Tensor],
     ) -> tuple[list[torch.Tensor], dict[str, int | float]]:
         config = self.kv_compression
-        patch_count = prefix.image_grid_height * prefix.image_grid_width
-        if patch_count != len(prefix.image_ids) - 2:
+        patch_count = prefix.image_patch_count
+        if patch_count != len(prefix.image_ids) - 2 * len(prefix.image_spans):
             raise ValueError(
                 "vision grid does not match the number of image patch tokens"
             )
@@ -370,43 +388,74 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         aggregate_scores = torch.stack(
             [scores_by_layer[index] for index in scored_layers]
         ).mean(dim=(0, 1))
-        tiles = build_vision_tiles(
-            prefix.image_grid_height,
-            prefix.image_grid_width,
-            config.vision_tile_size,
-        )
-        selected_tiles = select_top_vision_tiles(
-            aggregate_scores,
-            tiles,
-            config.vision_topk_tiles,
-        )
-        candidate_indices = torch.tensor(
-            sorted(
-                patch_index
-                for tile_index in selected_tiles
-                for patch_index in tiles[tile_index]
-            ),
-            dtype=torch.long,
-            device=aggregate_scores.device,
-        )
-        requested_keep = max(
-            1,
-            math.ceil(patch_count * config.vision_token_keep_ratio),
-        )
-        patch_keep_count = min(requested_keep, int(candidate_indices.numel()))
+        span_plans: list[tuple[int, int, int, torch.Tensor, int]] = []
+        score_offset = 0
+        total_tiles = 0
+        total_selected_tiles = 0
+        total_candidates = 0
+        total_kept = 0
+        for span in prefix.image_spans:
+            span_count = span.patch_count
+            span_scores = aggregate_scores[
+                score_offset : score_offset + span_count
+            ]
+            tiles = build_vision_tiles(
+                span.grid_height,
+                span.grid_width,
+                config.vision_tile_size,
+            )
+            selected_tiles = select_top_vision_tiles(
+                span_scores,
+                tiles,
+                config.vision_topk_tiles,
+            )
+            candidates = torch.tensor(
+                sorted(
+                    patch_index
+                    for tile_index in selected_tiles
+                    for patch_index in tiles[tile_index]
+                ),
+                dtype=torch.long,
+                device=aggregate_scores.device,
+            )
+            requested_keep = max(
+                1,
+                math.ceil(
+                    span_count * config.vision_token_keep_ratio
+                ),
+            )
+            keep_count = min(requested_keep, int(candidates.numel()))
+            span_plans.append(
+                (
+                    score_offset,
+                    span_count,
+                    span.patch_start,
+                    candidates,
+                    keep_count,
+                )
+            )
+            score_offset += span_count
+            total_tiles += len(tiles)
+            total_selected_tiles += len(selected_tiles)
+            total_candidates += int(candidates.numel())
+            total_kept += keep_count
+        if score_offset != patch_count:
+            raise ValueError("vision score spans do not cover all patches")
 
-        image_end_index = len(prefix.image_ids) - 1
         prompt_indices = torch.arange(
             len(prefix.image_ids),
             prefix.length,
             dtype=torch.long,
             device=aggregate_scores.device,
         )
-        boundary_start = torch.zeros(
-            1, dtype=torch.long, device=aggregate_scores.device
-        )
-        boundary_end = torch.tensor(
-            [image_end_index], dtype=torch.long, device=aggregate_scores.device
+        boundary_indices = torch.tensor(
+            [
+                index
+                for span in prefix.image_spans
+                for index in (span.token_start, span.token_end - 1)
+            ],
+            dtype=torch.long,
+            device=aggregate_scores.device,
         )
         num_layers = len(self.model.model.layers)
         keep_indices: list[torch.Tensor] = []
@@ -415,34 +464,50 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 scored_layers,
                 key=lambda selected: abs(selected - layer_index),
             )
-            patch_keep = select_patch_tokens_per_head(
-                scores_by_layer[score_layer],
-                candidate_indices,
-                patch_keep_count,
-            )
+            per_span_keeps = []
+            for (
+                score_start,
+                span_count,
+                token_start,
+                candidates,
+                keep_count,
+            ) in span_plans:
+                local_scores = scores_by_layer[score_layer][
+                    :, score_start : score_start + span_count
+                ]
+                selected = select_patch_tokens_per_head(
+                    local_scores,
+                    candidates,
+                    keep_count,
+                )
+                per_span_keeps.append(selected + token_start)
+            patch_keep = torch.cat(per_span_keeps, dim=1)
             layer_keep = []
             for head_index in range(patch_keep.shape[0]):
                 layer_keep.append(
                     torch.cat(
                         (
-                            boundary_start,
-                            patch_keep[head_index] + 1,
-                            boundary_end,
+                            boundary_indices,
+                            patch_keep[head_index],
                             prompt_indices,
                         )
-                    )
+                    ).sort().values
                 )
             keep_indices.append(torch.stack(layer_keep, dim=0).contiguous())
 
-        cached_prefix_tokens = patch_keep_count + 2 + len(prefix.prompt_ids)
+        cached_prefix_tokens = (
+            total_kept
+            + 2 * len(prefix.image_spans)
+            + len(prefix.prompt_ids)
+        )
         return keep_indices, {
             "dense_prefix_tokens": prefix.length,
             "cached_prefix_tokens": cached_prefix_tokens,
             "vision_patches": patch_count,
-            "vision_kept_patches": patch_keep_count,
-            "vision_tiles": len(tiles),
-            "vision_selected_tiles": len(selected_tiles),
-            "candidate_patches": int(candidate_indices.numel()),
+            "vision_kept_patches": total_kept,
+            "vision_tiles": total_tiles,
+            "vision_selected_tiles": total_selected_tiles,
+            "candidate_patches": total_candidates,
             "compression_ratio": cached_prefix_tokens / prefix.length,
         }
 
@@ -490,20 +555,29 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
 
     def _forward_image_prefix(
         self,
-        embeddings: torch.Tensor,
-        positions: list[int],
+        prefix: LLaDAOGuiPrefix,
         page_ids: list[int],
     ) -> None:
-        slot_mapping = self._range_slot_mapping(page_ids, 0, embeddings.size(0))
-        self._set_full_prefill_context(embeddings.size(0), slot_mapping)
-        try:
-            self.model(
-                None,
-                self._positions_tensor(positions),
-                input_embeds=embeddings,
+        # Each full-page tile is an independent visual document.  Running
+        # bidirectional prefill per tile preserves that native multi-image
+        # boundary and avoids quadratic attention across unrelated tiles.
+        # The subsequent text prompt attends all stored tile KV in one request.
+        for span in prefix.image_spans:
+            start, end = span.token_start, span.token_end
+            embeddings = prefix.image_embeddings[start:end]
+            positions = prefix.image_positions[start:end]
+            slot_mapping = self._range_slot_mapping(
+                page_ids, start, end - start
             )
-        finally:
-            reset_context_diffusion_lm()
+            self._set_full_prefill_context(end - start, slot_mapping)
+            try:
+                self.model(
+                    None,
+                    self._positions_tensor(positions),
+                    input_embeds=embeddings,
+                )
+            finally:
+                reset_context_diffusion_lm()
 
     def _forward_active(
         self,
@@ -530,6 +604,81 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             reset_context_diffusion_lm()
 
     @torch.inference_mode()
+    def diagnose_absolute_positions(
+        self,
+        prompt: str,
+        offsets: Sequence[int],
+    ) -> list[dict[str, Any]]:
+        """Run a short identical text at several absolute RoPE offsets."""
+
+        ids = [
+            self.prefix_encoder.bos_token_id,
+            *self.tokenizer.encode(prompt, add_special_tokens=False),
+            self.prefix_encoder.eos_token_id,
+        ]
+        if len(ids) > self.kv_cache_capacity:
+            raise ValueError("diagnostic prompt exceeds kv_cache_capacity")
+        page_ids = self._prefix_cache.allocate_pages(
+            math.ceil(len(ids) / self.page_size)
+        )
+        logits_by_offset: list[tuple[int, torch.Tensor]] = []
+        try:
+            for raw_offset in offsets:
+                offset = int(raw_offset)
+                if offset < 0 or offset + len(ids) > self.config.max_model_len:
+                    raise ValueError(
+                        f"diagnostic offset {offset} with {len(ids)} tokens "
+                        f"exceeds max_model_len={self.config.max_model_len}"
+                    )
+                slot_mapping = self._range_slot_mapping(
+                    page_ids, 0, len(ids)
+                )
+                self._set_full_prefill_context(len(ids), slot_mapping)
+                try:
+                    hidden = self.model(
+                        self._ids_tensor(ids),
+                        self._positions_tensor(
+                            range(offset, offset + len(ids))
+                        ),
+                    )
+                    logits = self.model.compute_logits(hidden[-1:]).float()[0]
+                finally:
+                    reset_context_diffusion_lm()
+                logits_by_offset.append((offset, logits.cpu()))
+        finally:
+            self._prefix_cache.release_pages(page_ids)
+
+        reference = logits_by_offset[0][1]
+        results: list[dict[str, Any]] = []
+        for offset, logits in logits_by_offset:
+            probabilities = torch.softmax(logits, dim=-1)
+            top = torch.topk(probabilities, k=5)
+            results.append(
+                {
+                    "offset": offset,
+                    "finite": bool(torch.isfinite(logits).all()),
+                    "top_token_ids": [
+                        int(value) for value in top.indices.tolist()
+                    ],
+                    "top_probabilities": [
+                        float(value) for value in top.values.tolist()
+                    ],
+                    "entropy": float(
+                        -(probabilities * probabilities.clamp_min(1e-30).log())
+                        .sum()
+                        .item()
+                    ),
+                    "cosine_to_offset_0": float(
+                        F.cosine_similarity(
+                            logits.unsqueeze(0),
+                            reference.unsqueeze(0),
+                        ).item()
+                    ),
+                }
+            )
+        return results
+
+    @torch.inference_mode()
     def generate_gui(
         self,
         image: Image.Image,
@@ -537,13 +686,24 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         *,
         max_new_tokens: int | None = None,
         max_iterations: int = 256,
+        full_page: bool = False,
+        full_page_tile_size: int = 980,
     ) -> LLaDAOGuiEngineOutput:
         total_started = time.perf_counter()
+        torch.cuda.reset_peak_memory_stats()
         max_new_tokens = int(max_new_tokens or self.max_new_tokens)
         if max_new_tokens <= 0 or max_new_tokens % self.block_length:
             raise ValueError("max_new_tokens must be a positive block multiple")
         prefix_started = time.perf_counter()
-        prefix = self.prefix_encoder.encode(image, prompt)
+        prefix = (
+            self.prefix_encoder.encode_full_page(
+                image,
+                prompt,
+                tile_size=full_page_tile_size,
+            )
+            if full_page
+            else self.prefix_encoder.encode(image, prompt)
+        )
         torch.cuda.synchronize()
         full_length = prefix.length + max_new_tokens
         if full_length > self.config.max_model_len:
@@ -551,12 +711,15 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 f"image+prompt+generation length {full_length} exceeds "
                 f"max_model_len={self.config.max_model_len}"
             )
+        if full_length > self.kv_cache_capacity:
+            raise ValueError(
+                f"image+prompt+generation length {full_length} exceeds "
+                f"kv_cache_capacity={self.kv_cache_capacity}"
+            )
         pages_needed = math.ceil(full_length / self.page_size)
         page_ids = self._prefix_cache.allocate_pages(pages_needed)
         try:
-            self._forward_image_prefix(
-                prefix.image_embeddings, prefix.image_positions, page_ids
-            )
+            self._forward_image_prefix(prefix, page_ids)
             torch.cuda.synchronize()
             image_cached = time.perf_counter()
             query_capture = {} if self._compression_reduces_context() else None
@@ -571,19 +734,23 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             torch.cuda.synchronize()
             dense_prompt_cached = time.perf_counter()
 
-            tiles = build_vision_tiles(
-                prefix.image_grid_height,
-                prefix.image_grid_width,
-                self.kv_compression.vision_tile_size,
-            )
+            tiles = [
+                tile
+                for span in prefix.image_spans
+                for tile in build_vision_tiles(
+                    span.grid_height,
+                    span.grid_width,
+                    self.kv_compression.vision_tile_size,
+                )
+            ]
             compression_stats: dict[str, int | float] = {
                 "dense_prefix_tokens": prefix.length,
                 "cached_prefix_tokens": prefix.length,
-                "vision_patches": len(prefix.image_ids) - 2,
-                "vision_kept_patches": len(prefix.image_ids) - 2,
+                "vision_patches": prefix.image_patch_count,
+                "vision_kept_patches": prefix.image_patch_count,
                 "vision_tiles": len(tiles),
                 "vision_selected_tiles": len(tiles),
-                "candidate_patches": len(prefix.image_ids) - 2,
+                "candidate_patches": prefix.image_patch_count,
                 "compression_ratio": 1.0,
             }
             cached_prefix_len = prefix.length
@@ -789,6 +956,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             text = self.tokenizer.decode(
                 output.tolist(), skip_special_tokens=False
             )
+            peak_allocated = torch.cuda.max_memory_allocated() / 2**30
+            peak_reserved = torch.cuda.max_memory_reserved() / 2**30
             return LLaDAOGuiEngineOutput(
                 text=text,
                 token_ids=output.tolist(),
@@ -805,10 +974,15 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 vision_selected_tiles=int(
                     compression_stats["vision_selected_tiles"]
                 ),
+                input_images=len(prefix.image_spans),
+                source_width=prefix.source_width,
+                source_height=prefix.source_height,
                 image_seconds=image_cached - prefix_started,
                 prompt_seconds=prompt_cached - image_cached,
                 generation_seconds=generation_finished - generation_started,
                 total_seconds=generation_finished - total_started,
+                peak_memory_allocated_gib=peak_allocated,
+                peak_memory_reserved_gib=peak_reserved,
                 trace=trace,
             )
         finally:
