@@ -191,6 +191,59 @@ LIMIT=100 MODE=original \
   bash d2f_vllm/mllm_lladao_gui_ocr_retrieval.sh
 ```
 
+### Uncropped YaRN 128K with a full-page coordinate anchor
+
+The raw true-long run above has no global coordinate reference: it presents
+independent full-resolution tiles to a checkpoint trained on one image and
+asks it to return a box normalized to the complete page. The deployable
+uncropped launcher keeps every exact tile, appends a checkpoint-native resized
+overview of the same complete screenshot as a global coordinate anchor, and
+then applies prompt-only OCR retrieval:
+
+```bash
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+
+LIMIT=100 \
+GPU=0 \
+RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-ocr-n100 \
+MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-model.log \
+OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-ocr.log \
+nohup bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_ocr.sh \
+  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-launcher.log 2>&1 &
+```
+
+Monitor the model and OCR stages separately:
+
+```bash
+tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-model.log
+tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-ocr.log
+```
+
+The final predictions and score table are written to:
+
+```text
+/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-ocr-n100/fused/
+/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-ocr-n100/fused/scores/results.csv
+```
+
+This protocol does not target-crop or discard any source region. All original
+pixels remain in exact, non-overlapping 980-pixel tiles; the additional
+overview is a resized duplicate used only to establish the page-wide
+coordinate system. The runtime uses YaRN factor 8, a 131,072-position model
+limit, `strided` multimodal positions, 65,536 resident KV tokens, and no KV
+compression. Do not set resident KV capacity to 131,072 merely to match the
+positional limit: the runtime preallocates that cache and requires about
+64.5 GiB for KV alone.
+
+On the fixed first 100 Mind2Web full-page samples, actual sequences ranged
+from 19,166 to 63,121 tokens and the maximum generation RoPE position was
+63,120. The raw model scored 7% SSR. Prompt-only OCR, which reads only the
+visible instruction and screenshot and never reads the target box or DOM
+location, produced 75% SSR, 75% joint SSR, 100% action F1, and a 100% parse
+rate. The native D2F plus OCR retrieval-crop pipeline below scored 80% SSR on
+the identical sample IDs. These are full-page deployment diagnostics, not
+paper-comparable cropped Mind2Web results.
+
 For controls whose visible label is adjacent to rather than inside the
 clickable box, run the complete two-stage retrieval-crop pipeline:
 

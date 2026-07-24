@@ -364,6 +364,22 @@ LIMIT=100 GPU=0 bash \
   /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/d2f_vllm/mllm_lladao_gui_nonpd.sh
 ```
 
+For the uncropped full-page YaRN 128K pipeline, which retains every exact
+full-resolution tile, adds a whole-page coordinate overview, disables KV
+compression, and finishes with prompt-only OCR retrieval, run:
+
+```shell
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+LIMIT=100 GPU=0 \
+  bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_ocr.sh
+```
+
+The validated 100-sample run reached a real maximum generation position of
+63,120 and scored 75% SSR after OCR; the raw model-only result was 7% SSR.
+See [the long-context benchmark guide](d2f_vllm/README.md#uncropped-yarn-128k-with-a-full-page-coordinate-anchor)
+for the detached launch command, log paths, output layout, memory warning, and
+comparison with the 80% native OCR retrieval-crop pipeline.
+
 The launcher uses vLLM's fused CUDA RMSNorm by default. It keeps BF16 inputs
 and FP32 accumulation, and the 100-sample paired gate retains 80% SSR and 100%
 action F1. Set `D2F_VLLM_RMS_NORM_BACKEND=torch` to reproduce the unfused
