@@ -138,3 +138,45 @@ The launcher is append-only and resumable. Its default output is isolated below
 prediction records the actual input protocol, dense runtime token count,
 `position_mode`, `max_prefill_position`, and `max_generation_position` so the
 two protocols can be audited.
+
+### Controlled YaRN isolation
+
+Before using a full-page sequential-position run to judge YaRN, compare the
+original 16K model and YaRN 128K with every non-RoPE variable held constant:
+
+```bash
+LIMIT=100 bash d2f_vllm/mllm_lladao_gui_yarn_isolation_ab.sh
+```
+
+Both arms use the same 100 samples, checkpoint-native image resize and
+multimodal positions, 16K resident KV capacity, and disabled KV compression.
+Only RoPE scaling and the advertised maximum position differ. On revision
+`9e544d1`, the controlled result was 26% SSR for original 16K and 22% for YaRN
+128K. Both arms had a maximum generation position of 86, so this is a
+short-position sensitivity measurement rather than a long-position
+extrapolation result.
+
+### Full-page OCR retrieval
+
+Native resize discards small full-page text and reduced the same 100-sample
+raw-page benchmark to 26% SSR. The deployable retrieval launcher keeps that
+D2F prediction as a fallback and weak location prior, then locates the target
+phrase in the original screenshot with tile-wise OCR:
+
+```bash
+LIMIT=100 MODE=original \
+  bash d2f_vllm/mllm_lladao_gui_ocr_retrieval.sh
+```
+
+The retrieval stage reads the visible instruction and screenshot only; it
+does not read target boxes or DOM locations. The validated defaults restored
+SSR to 79% on those 100 samples while retaining 100% action F1. Use
+`MODE=yarn` to apply the identical retrieval stage to the controlled YaRN
+arm. To reuse an existing model prediction directory:
+
+```bash
+RUN_MODEL=0 \
+MODEL_OUTPUT=/path/to/model/predictions \
+LIMIT=100 MODE=original \
+  bash d2f_vllm/mllm_lladao_gui_ocr_retrieval.sh
+```
