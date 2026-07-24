@@ -12,6 +12,8 @@ MODE="${MODE:-yarn}"
 GPU="${GPU:-0}"
 MASTER_PORT="${MASTER_PORT:-32343}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
+INPUT_MODE="${INPUT_MODE:-}"
+LIMIT="${LIMIT:-}"
 FULL_PAGE_POSITION_MODE="${FULL_PAGE_POSITION_MODE:-sequential}"
 KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-0}"
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
@@ -37,24 +39,54 @@ export TOKENIZERS_PARALLELISM=false
 case "$MODE" in
   yarn)
     ROPE_ARGS=(--rope-scaling yarn --rope-factor 8)
-    FULL_PAGE_ARGS=(--full-page-tiles)
     ;;
   unscaled)
     ROPE_ARGS=(--rope-scaling none --allow-unscaled-max-model-len)
-    FULL_PAGE_ARGS=(--full-page-tiles)
     ;;
   original)
     MAX_MODEL_LEN=16384
     KV_CACHE_CAPACITY=16384
-    FULL_PAGE_POSITION_MODE=native
     ROPE_ARGS=(--rope-scaling none)
-    FULL_PAGE_ARGS=(--no-full-page-tiles)
     ;;
   *)
     echo "MODE must be one of: original, unscaled, yarn" >&2
     exit 2
     ;;
 esac
+
+if [[ -z "$INPUT_MODE" ]]; then
+  if [[ "$MODE" == "original" ]]; then
+    INPUT_MODE="native_resize"
+  else
+    INPUT_MODE="full_page"
+  fi
+fi
+case "$INPUT_MODE" in
+  native_resize)
+    FULL_PAGE_POSITION_MODE=native
+    FULL_PAGE_ARGS=(--no-full-page-tiles)
+    ;;
+  full_page)
+    FULL_PAGE_ARGS=(--full-page-tiles)
+    ;;
+  *)
+    echo "INPUT_MODE must be one of: native_resize, full_page" >&2
+    exit 2
+    ;;
+esac
+if [[ "$MODE" == "original" && "$INPUT_MODE" != "native_resize" ]]; then
+  echo "MODE=original requires INPUT_MODE=native_resize" >&2
+  exit 2
+fi
+
+LIMIT_ARGS=()
+if [[ -n "$LIMIT" ]]; then
+  if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "LIMIT must be a positive integer" >&2
+    exit 2
+  fi
+  LIMIT_ARGS=(--limit "$LIMIT")
+fi
 
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   COMPRESSION_FLAG="--kv-cache-compression"
@@ -65,7 +97,7 @@ fi
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] full_page_position_mode=$FULL_PAGE_POSITION_MODE kv_cache_compression=$KV_CACHE_COMPRESSION"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -78,6 +110,7 @@ fi
   --benchmark-root "$BENCHMARK_ROOT" \
   --output-dir "$OUTPUT_DIR" \
   --benchmarks mind2web_fullpage \
+  "${LIMIT_ARGS[@]}" \
   --warmup 0 \
   --max-new-tokens 64 \
   --block-size 16 \
@@ -110,7 +143,8 @@ fi
     --benchmark-root "$BENCHMARK_ROOT" \
     --predictions-dir "$OUTPUT_DIR" \
     --output-dir "$OUTPUT_DIR/scores" \
-    --benchmarks mind2web_fullpage
+    --benchmarks mind2web_fullpage \
+    "${LIMIT_ARGS[@]}"
 ) 2>&1 | tee -a "$LOG"
 
 echo "[$(date '+%F %T')] LONG_CONTEXT_DONE mode=$MODE output=$OUTPUT_DIR" |
