@@ -190,3 +190,25 @@ MODEL_OUTPUT=/path/to/model/predictions \
 LIMIT=100 MODE=original \
   bash d2f_vllm/mllm_lladao_gui_ocr_retrieval.sh
 ```
+
+For controls whose visible label is adjacent to rather than inside the
+clickable box, run the complete two-stage retrieval-crop pipeline:
+
+```bash
+LIMIT=100 \
+  bash d2f_vllm/mllm_lladao_gui_ocr_crop_pipeline.sh
+```
+
+The pipeline runs native D2F once to provide a weak duplicate-text prior,
+performs tile-wise OCR on the original screenshot, runs native D2F again on a
+980-pixel retrieval crop, and maps the selected local box back into the
+original full-page coordinate system. Crop selection uses only the visible
+instruction and OCR output; ground-truth locations are used only by the
+scorer. On the controlled 100-sample full-page set this produced 80% SSR,
+80% joint SSR, 100% action F1, and a 100% parse rate, compared with 0% SSR for
+the unadapted true-long YaRN arm.
+
+All intermediate artifacts are retained below the result root:
+`native-model`, `ocr-retrieval`, `retrieval-crop-benchmark`,
+`retrieval-crop-model`, and `fused`. Set `RUN_MODEL=0` and `MODEL_OUTPUT` to
+reuse an existing native prediction directory.
