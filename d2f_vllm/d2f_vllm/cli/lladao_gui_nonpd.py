@@ -40,6 +40,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument(
+        "--full-page-overview",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "append a checkpoint-native whole-page resize after all exact "
+            "full-resolution tiles as a global coordinate anchor"
+        ),
+    )
+    parser.add_argument(
         "--full-page-position-mode",
         choices=("native", "strided", "sequential"),
         default="native",
@@ -141,6 +150,7 @@ def main() -> None:
                 full_page=args.full_page_tiles,
                 full_page_tile_size=args.full_page_tile_size,
                 full_page_position_mode=args.full_page_position_mode,
+                full_page_overview=args.full_page_overview,
             ).to_dict()
     finally:
         engine.close()

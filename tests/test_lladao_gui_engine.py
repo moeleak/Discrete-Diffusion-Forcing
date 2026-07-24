@@ -194,6 +194,34 @@ def test_strided_multimodal_positions_preserve_native_image_invariant():
     assert prompt == [13_308, 13_309, 13_310, 13_311]
 
 
+def test_overview_grounding_prompt_names_tiles_and_global_anchor():
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "D2F-eval"
+        / "eval_lladao_gui.py"
+    )
+    spec = importlib.util.spec_from_file_location("eval_lladao_gui", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    prompt = module.overview_grounding_prompt(
+        {
+            "prompt": "Click on Submit.",
+            "native_prompt": "Click on Submit.",
+            "tile_layout": [{}, {}, {}],
+            "image_width": 1_280,
+            "image_height": 4_000,
+        }
+    )
+    assert "first 3 images are exact non-overlapping tiles" in prompt
+    assert "final image is a resized overview" in prompt
+    assert "complete original screenshot in [0,1000]" in prompt
+    assert "Click on Submit." in prompt
+
+
 def test_multimodal_positions_reject_unknown_mode():
     from d2f_vllm.multimodal.lladao_gui import (
         build_multimodal_position_ids,

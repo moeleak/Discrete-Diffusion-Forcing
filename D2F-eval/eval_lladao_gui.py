@@ -102,6 +102,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument(
+        "--full-page-overview",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "append a checkpoint-native whole-page resize after all exact "
+            "full-resolution tiles as a global coordinate anchor"
+        ),
+    )
+    parser.add_argument(
         "--full-page-position-mode",
         choices=("native", "strided", "sequential"),
         default="native",
@@ -248,6 +257,33 @@ def resolve_sample_input(
     return False, prompt, "native_resize"
 
 
+def overview_grounding_prompt(sample: dict[str, Any]) -> str:
+    """Describe exact tiles plus the final whole-page overview without a crop."""
+
+    layout = sample.get("tile_layout")
+    width = sample.get("image_width")
+    height = sample.get("image_height")
+    if (
+        not isinstance(layout, list)
+        or not layout
+        or not isinstance(width, int)
+        or not isinstance(height, int)
+    ):
+        raise ValueError(
+            "full-page overview requires tile_layout and integer image size"
+        )
+    instruction = native_resize_prompt(sample)
+    return (
+        f"The first {len(layout)} images are exact non-overlapping tiles from "
+        f"one {width}x{height} webpage screenshot, ordered left-to-right and "
+        "then top-to-bottom. The final image is a resized overview of that "
+        "same complete screenshot. Treat all images as one page and use the "
+        "final overview as the global coordinate reference. "
+        f"{instruction} Return the action and bounding box with coordinates "
+        "normalized to the complete original screenshot in [0,1000]."
+    )
+
+
 def select_device(args: argparse.Namespace) -> str:
     if args.device:
         return args.device
@@ -358,6 +394,7 @@ def model_generate(
         full_page=full_page,
         full_page_tile_size=args.full_page_tile_size,
         full_page_position_mode=args.full_page_position_mode,
+        full_page_overview=args.full_page_overview,
     )
     return {
         "raw_text": output.text,
@@ -398,6 +435,9 @@ def infer_one(
     full_page, prompt, runtime_input_protocol = resolve_sample_input(
         sample, args.full_page_tiles
     )
+    if full_page and args.full_page_overview:
+        prompt = overview_grounding_prompt(sample)
+        runtime_input_protocol = "full_page_tiles_with_overview"
     if args.backend == "d2f_vllm" and full_page:
         sequence = sample.get("sequence_tokens")
         expected_total = (
@@ -570,6 +610,7 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "full_page_tiles": args.full_page_tiles,
         "full_page_tile_size": args.full_page_tile_size,
         "full_page_position_mode": args.full_page_position_mode,
+        "full_page_overview": args.full_page_overview,
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
         "kv_cache_compression": args.kv_cache_compression,

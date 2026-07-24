@@ -505,11 +505,17 @@ class LLaDAOGuiPrefixEncoder:
         *,
         tile_size: int = 980,
         position_mode: str = "native",
+        include_overview: bool = False,
     ) -> LLaDAOGuiPrefix:
         image = image.convert("RGB")
         width, height = image.size
         boxes = full_page_tile_boxes(width, height, tile_size)
         images = [(image.crop(box), box) for box in boxes]
+        if include_overview:
+            # Keep every source pixel in the exact full-resolution tiles, then
+            # append the checkpoint-native whole-page resize as a global
+            # coordinate anchor. This is an overview, not a target crop.
+            images.append((self._resize(image), (0, 0, width, height)))
         return self._encode_images(
             images,
             prompt,

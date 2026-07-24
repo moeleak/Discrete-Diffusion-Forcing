@@ -692,6 +692,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         full_page: bool = False,
         full_page_tile_size: int = 980,
         full_page_position_mode: str = "native",
+        full_page_overview: bool = False,
     ) -> LLaDAOGuiEngineOutput:
         total_started = time.perf_counter()
         torch.cuda.reset_peak_memory_stats()
@@ -705,6 +706,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 prompt,
                 tile_size=full_page_tile_size,
                 position_mode=full_page_position_mode,
+                include_overview=full_page_overview,
             )
             if full_page
             else self.prefix_encoder.encode(image, prompt)
@@ -713,6 +715,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             raise ValueError(
                 "full_page_position_mode requires full_page=True"
             )
+        if not full_page and full_page_overview:
+            raise ValueError("full_page_overview requires full_page=True")
         torch.cuda.synchronize()
         full_length = prefix.length + max_new_tokens
         if full_length > self.config.max_model_len:
