@@ -121,28 +121,28 @@ independent bidirectional visual prefill, and the grounding prompt attends all
 tile KV in a single request. This avoids quadratic attention across unrelated
 tiles while preserving the complete page context.
 
-Run the deployable original-16K/YaRN-128K comparison concurrently on two
-GPUs. The 16K arm uses the checkpoint-native single-image resize and native
-positions; the 128K arm keeps the original full-page pixels as tiles and uses
-sequential positions:
+Run the causal true-long YaRN comparison concurrently on two GPUs. Both arms
+keep the original full-page pixels as tiles, use sequential positions above
+16K, advertise 128K, reserve 65,536 resident KV tokens, and disable KV
+compression. The only model change is unscaled RoPE versus YaRN:
 
 ```bash
-nohup bash d2f_vllm/mllm_lladao_gui_yarn_ab.sh \
+LIMIT=100 nohup bash d2f_vllm/mllm_lladao_gui_yarn_ab.sh \
   > /home/ma-user/work/LLaDA-o/logs/yarn-ab-nohup.log 2>&1 &
 ```
 
-The launcher is append-only and resumable. Its default output is isolated below
-`results/d2f-vllm-fullpage-native-resize-nocompress-original16k`,
-`results/d2f-vllm-fullpage-sequential-nocompress-yarn`, and
-`results/d2f-vllm-fullpage-original16k-vs-yarn128k-comparison`. Every
-prediction records the actual input protocol, dense runtime token count,
-`position_mode`, `max_prefill_position`, and `max_generation_position` so the
-two protocols can be audited.
+The default output is isolated below
+`results/d2f-vllm-true-long-yarn-isolation-<revision>-n100`. Every prediction
+records the dense runtime token count, `position_mode`,
+`max_prefill_position`, and `max_generation_position`. The comparison rejects
+native positions, samples at or below 16K, compressed KV, mismatched seeds, or
+mismatched runtime token counts.
 
 ### Controlled YaRN isolation
 
-Before using a full-page sequential-position run to judge YaRN, compare the
-original 16K model and YaRN 128K with every non-RoPE variable held constant:
+To measure whether static YaRN perturbs inputs that remain inside the
+checkpoint-native regime, compare original 16K and YaRN 128K with every
+non-RoPE variable held constant:
 
 ```bash
 LIMIT=100 bash d2f_vllm/mllm_lladao_gui_yarn_isolation_ab.sh
@@ -154,7 +154,8 @@ Only RoPE scaling and the advertised maximum position differ. On revision
 `9e544d1`, the controlled result was 26% SSR for original 16K and 22% for YaRN
 128K. Both arms had a maximum generation position of 86, so this is a
 short-position sensitivity measurement rather than a long-position
-extrapolation result.
+extrapolation result. It must not be used to claim that YaRN does or does not
+improve positions above 16K.
 
 ### Full-page OCR retrieval
 
