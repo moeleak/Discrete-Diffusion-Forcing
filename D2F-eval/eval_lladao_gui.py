@@ -94,7 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--full-page-tiles",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
+        help=(
+            "override the prepared sample input protocol; omit to follow the "
+            "manifest, pass --no-full-page-tiles for native single-image resize"
+        ),
     )
     parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument(
@@ -186,6 +190,61 @@ def clean_response_text(text: str) -> str:
     if "</think>" in text:
         text = text.split("</think>")[-1]
     return text.replace("<|endoftext|>", "").strip()
+
+
+def native_resize_prompt(sample: dict[str, Any]) -> str:
+    """Return the checkpoint-native prompt for a prepared full-page sample."""
+
+    native_prompt = sample.get("native_prompt")
+    if isinstance(native_prompt, str) and native_prompt.strip():
+        return native_prompt
+    prompt = str(sample["prompt"])
+    layout = sample.get("tile_layout")
+    tile_count = len(layout) if isinstance(layout, list) else None
+    width = sample.get("image_width")
+    height = sample.get("image_height")
+    if not all(isinstance(value, int) for value in (tile_count, width, height)):
+        raise ValueError(
+            "native resize of a full-page sample requires native_prompt or "
+            "integer tile/image metadata"
+        )
+    prefix = (
+        f"The following {tile_count} images are non-overlapping tiles from one "
+        f"{width}x{height} webpage screenshot, ordered left-to-right and then "
+        "top-to-bottom. Treat them as one complete page. "
+    )
+    suffix = (
+        " Return the action and bounding box with coordinates normalized to "
+        "the complete original screenshot in [0,1000]."
+    )
+    if not prompt.startswith(prefix) or not prompt.endswith(suffix):
+        raise ValueError(
+            "cannot recover the checkpoint-native prompt from the full-page "
+            "benchmark wrapper"
+        )
+    return prompt[len(prefix) : -len(suffix)]
+
+
+def resolve_sample_input(
+    sample: dict[str, Any],
+    full_page_override: bool | None,
+) -> tuple[bool, str, str]:
+    """Resolve the actual image preprocessing and prompt used for inference."""
+
+    prepared_full_page = sample.get("input_protocol") == "full_page_tiles"
+    full_page = (
+        prepared_full_page
+        if full_page_override is None
+        else full_page_override
+    )
+    if full_page:
+        return True, str(sample["prompt"]), "full_page_tiles"
+    prompt = (
+        native_resize_prompt(sample)
+        if prepared_full_page
+        else str(sample["prompt"])
+    )
+    return False, prompt, "native_resize"
 
 
 def select_device(args: argparse.Namespace) -> str:
@@ -335,7 +394,10 @@ def infer_one(
 ) -> dict[str, Any]:
     inference_seed = paired_sample_seed(sample, args.seed)
     set_seed(inference_seed)
-    if args.backend == "d2f_vllm":
+    full_page, prompt, runtime_input_protocol = resolve_sample_input(
+        sample, args.full_page_tiles
+    )
+    if args.backend == "d2f_vllm" and full_page:
         sequence = sample.get("sequence_tokens")
         expected_total = (
             sequence.get("total") if isinstance(sequence, dict) else None
@@ -354,14 +416,10 @@ def infer_one(
     started = time.perf_counter()
     with Image.open(root / sample["image"]) as source:
         image = source.convert("RGB")
-        full_page = bool(
-            args.full_page_tiles
-            or sample.get("input_protocol") == "full_page_tiles"
-        )
         result = model_generate(
             engine,
             image,
-            sample["prompt"],
+            prompt,
             args,
             full_page=full_page,
         )
@@ -384,6 +442,7 @@ def infer_one(
         "target_action": sample["target_action"],
         "target_bbox_1000": sample["target_bbox_1000"],
         "target_value": sample.get("target_value", ""),
+        "runtime_input_protocol": runtime_input_protocol,
         "latency_seconds": latency,
         "model_elapsed_seconds": result["total_seconds"],
         "image_cache_seconds": result["image_cache_seconds"],
@@ -414,6 +473,11 @@ def infer_one(
         "convergence_steps": result["iterations"],
         "valid_tokens": len(result["tokens"]),
         "generated_tokens": args.max_new_tokens,
+        "runtime_sequence_tokens": (
+            result.get("dense_prefix_tokens", 0) + args.max_new_tokens
+            if isinstance(result.get("dense_prefix_tokens"), int)
+            else None
+        ),
         "generation_stats": result["trace"],
         "inference_seed": inference_seed,
         "error": None,
@@ -435,6 +499,7 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "target_action": sample["target_action"],
         "target_bbox_1000": sample["target_bbox_1000"],
         "target_value": sample.get("target_value", ""),
+        "runtime_input_protocol": None,
         "latency_seconds": None,
         "model_elapsed_seconds": None,
         "image_cache_seconds": None,
@@ -457,6 +522,7 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "convergence_steps": None,
         "valid_tokens": None,
         "generated_tokens": None,
+        "runtime_sequence_tokens": None,
         "generation_stats": None,
         "inference_seed": paired_sample_seed(sample, args.seed),
         "error": f"{type(exc).__name__}: {exc}",

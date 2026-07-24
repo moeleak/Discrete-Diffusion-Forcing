@@ -37,14 +37,18 @@ export TOKENIZERS_PARALLELISM=false
 case "$MODE" in
   yarn)
     ROPE_ARGS=(--rope-scaling yarn --rope-factor 8)
+    FULL_PAGE_ARGS=(--full-page-tiles)
     ;;
   unscaled)
     ROPE_ARGS=(--rope-scaling none --allow-unscaled-max-model-len)
+    FULL_PAGE_ARGS=(--full-page-tiles)
     ;;
   original)
     MAX_MODEL_LEN=16384
     KV_CACHE_CAPACITY=16384
+    FULL_PAGE_POSITION_MODE=native
     ROPE_ARGS=(--rope-scaling none)
+    FULL_PAGE_ARGS=(--no-full-page-tiles)
     ;;
   *)
     echo "MODE must be one of: original, unscaled, yarn" >&2
@@ -83,7 +87,7 @@ fi
   --max-model-len "$MAX_MODEL_LEN" \
   --kv-cache-capacity "$KV_CACHE_CAPACITY" \
   --original-max-position-embeddings 16384 \
-  --full-page-tiles \
+  "${FULL_PAGE_ARGS[@]}" \
   --full-page-tile-size 980 \
   --full-page-position-mode "$FULL_PAGE_POSITION_MODE" \
   --master-port "$MASTER_PORT" \

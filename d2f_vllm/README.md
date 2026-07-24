@@ -121,15 +121,20 @@ independent bidirectional visual prefill, and the grounding prompt attends all
 tile KV in a single request. This avoids quadratic attention across unrelated
 tiles while preserving the complete page context.
 
-Run the unscaled/YaRN comparison concurrently on two GPUs:
+Run the deployable original-16K/YaRN-128K comparison concurrently on two
+GPUs. The 16K arm uses the checkpoint-native single-image resize and native
+positions; the 128K arm keeps the original full-page pixels as tiles and uses
+sequential positions:
 
 ```bash
 nohup bash d2f_vllm/mllm_lladao_gui_yarn_ab.sh \
   > /home/ma-user/work/LLaDA-o/logs/yarn-ab-nohup.log 2>&1 &
 ```
 
-The launcher is append-only and resumable. Its default output is isolated from
-native/compressed runs below
-`results/d2f-vllm-fullpage-sequential-nocompress-*`. Every prediction records
+The launcher is append-only and resumable. Its default output is isolated below
+`results/d2f-vllm-fullpage-native-resize-nocompress-original16k`,
+`results/d2f-vllm-fullpage-sequential-nocompress-yarn`, and
+`results/d2f-vllm-fullpage-original16k-vs-yarn128k-comparison`. Every
+prediction records the actual input protocol, dense runtime token count,
 `position_mode`, `max_prefill_position`, and `max_generation_position` so the
-actual RoPE range can be audited.
+two protocols can be audited.
