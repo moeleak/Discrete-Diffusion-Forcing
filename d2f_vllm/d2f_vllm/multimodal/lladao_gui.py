@@ -237,18 +237,20 @@ def build_multimodal_position_ids(
     *,
     mode: str = "native",
 ) -> tuple[list[int], list[int]]:
-    """Build native or token-sequential LLM RoPE positions.
+    """Build native, tile-strided, or token-sequential LLM RoPE positions.
 
     LLaDA-o natively gives every token from one image a shared global
-    position.  The opt-in ``sequential`` mode instead assigns every visual
-    boundary/patch token its own absolute position and starts the text prompt
-    after the complete visual prefix.  This is intended for controlled
-    long-RoPE experiments, not as a silent change to native inference.
+    position. ``strided`` preserves that within-image invariant while placing
+    each image at its dense-prefix token offset. The opt-in ``sequential``
+    mode instead assigns every visual boundary/patch token its own absolute
+    position. Both long modes start the text prompt after the complete visual
+    prefix.
     """
 
-    if mode not in {"native", "sequential"}:
+    if mode not in {"native", "strided", "sequential"}:
         raise ValueError(
-            "multimodal position mode must be one of: native, sequential"
+            "multimodal position mode must be one of: "
+            "native, strided, sequential"
         )
     lengths = [int(length) for length in image_token_lengths]
     if not lengths or any(length <= 0 for length in lengths):
@@ -262,6 +264,8 @@ def build_multimodal_position_ids(
     for image_index, length in enumerate(lengths):
         if mode == "native":
             image_positions.extend([image_index] * length)
+        elif mode == "strided":
+            image_positions.extend([token_cursor] * length)
         else:
             image_positions.extend(range(token_cursor, token_cursor + length))
         token_cursor += length

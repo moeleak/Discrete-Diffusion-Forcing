@@ -103,11 +103,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-page-tile-size", type=int, default=980)
     parser.add_argument(
         "--full-page-position-mode",
-        choices=("native", "sequential"),
+        choices=("native", "strided", "sequential"),
         default="native",
         help=(
-            "native shares one LLM RoPE position per image; sequential gives "
-            "every visual token an absolute position for long-RoPE experiments"
+            "native shares one small LLM RoPE position per image; strided "
+            "keeps a shared position within each image at its dense token "
+            "offset; sequential gives every visual token an absolute position"
         ),
     )
     parser.add_argument("--master-port", type=int, default=2333)

@@ -175,12 +175,31 @@ def test_sequential_multimodal_positions_reach_the_dense_token_length():
     assert image + prompt == list(range(63_826))
 
 
+def test_strided_multimodal_positions_preserve_native_image_invariant():
+    from d2f_vllm.multimodal.lladao_gui import (
+        build_multimodal_position_ids,
+    )
+
+    image, prompt = build_multimodal_position_ids(
+        [4_902, 1_752, 4_902, 1_752],
+        4,
+        mode="strided",
+    )
+    assert image == (
+        [0] * 4_902
+        + [4_902] * 1_752
+        + [6_654] * 4_902
+        + [11_556] * 1_752
+    )
+    assert prompt == [13_308, 13_309, 13_310, 13_311]
+
+
 def test_multimodal_positions_reject_unknown_mode():
     from d2f_vllm.multimodal.lladao_gui import (
         build_multimodal_position_ids,
     )
 
-    with pytest.raises(ValueError, match="native, sequential"):
+    with pytest.raises(ValueError, match="native, strided, sequential"):
         build_multimodal_position_ids([5], 2, mode="compressed")
 
 
