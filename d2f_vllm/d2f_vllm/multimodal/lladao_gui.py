@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import torch
 import torch.nn.functional as F
@@ -201,6 +202,7 @@ class LLaDAOGuiPrefix:
     source_height: int
     prompt_ids: list[int]
     prompt_positions: list[int]
+    position_mode: str = "native"
 
     @property
     def length(self) -> int:
@@ -227,6 +229,45 @@ def full_page_tile_boxes(
         for top in range(0, height, tile_size)
         for left in range(0, width, tile_size)
     ]
+
+
+def build_multimodal_position_ids(
+    image_token_lengths: Sequence[int],
+    prompt_token_length: int,
+    *,
+    mode: str = "native",
+) -> tuple[list[int], list[int]]:
+    """Build native or token-sequential LLM RoPE positions.
+
+    LLaDA-o natively gives every token from one image a shared global
+    position.  The opt-in ``sequential`` mode instead assigns every visual
+    boundary/patch token its own absolute position and starts the text prompt
+    after the complete visual prefix.  This is intended for controlled
+    long-RoPE experiments, not as a silent change to native inference.
+    """
+
+    if mode not in {"native", "sequential"}:
+        raise ValueError(
+            "multimodal position mode must be one of: native, sequential"
+        )
+    lengths = [int(length) for length in image_token_lengths]
+    if not lengths or any(length <= 0 for length in lengths):
+        raise ValueError("image_token_lengths must contain positive values")
+    prompt_length = int(prompt_token_length)
+    if prompt_length <= 0:
+        raise ValueError("prompt_token_length must be positive")
+
+    image_positions: list[int] = []
+    token_cursor = 0
+    for image_index, length in enumerate(lengths):
+        if mode == "native":
+            image_positions.extend([image_index] * length)
+        else:
+            image_positions.extend(range(token_cursor, token_cursor + length))
+        token_cursor += length
+    prompt_start = len(lengths) if mode == "native" else token_cursor
+    prompt_positions = list(range(prompt_start, prompt_start + prompt_length))
+    return image_positions, prompt_positions
 
 
 class LLaDAOGuiPrefixEncoder:
@@ -373,6 +414,7 @@ class LLaDAOGuiPrefixEncoder:
         *,
         resize: bool,
         source_size: tuple[int, int],
+        position_mode: str = "native",
     ) -> LLaDAOGuiPrefix:
         if not images:
             raise ValueError("at least one image is required")
@@ -383,12 +425,12 @@ class LLaDAOGuiPrefixEncoder:
         )
         boundary = self.token_embedding(boundary_ids)
         image_ids: list[int] = []
-        image_positions: list[int] = []
         image_embeddings: list[torch.Tensor] = []
         image_spans: list[LLaDAOGuiImageSpan] = []
+        image_token_lengths: list[int] = []
         token_cursor = 0
 
-        for image_index, (image, source_box) in enumerate(images):
+        for image, source_box in images:
             patchify = self._patchify if resize else self._patchify_exact
             patches, vision_positions, grid_height, grid_width = patchify(
                 image.convert("RGB")
@@ -416,7 +458,7 @@ class LLaDAOGuiPrefixEncoder:
             image_ids.extend(
                 [self.start_image_id] + [0] * patch_count + [self.end_image_id]
             )
-            image_positions.extend([image_index] * (patch_count + 2))
+            image_token_lengths.append(patch_count + 2)
             token_cursor = span.token_end
 
         prompt_ids = [
@@ -424,7 +466,11 @@ class LLaDAOGuiPrefixEncoder:
             *self.tokenizer.encode(prompt, add_special_tokens=False),
             self.eos_token_id,
         ]
-        prompt_position_start = len(images)
+        image_positions, prompt_positions = build_multimodal_position_ids(
+            image_token_lengths,
+            len(prompt_ids),
+            mode=position_mode,
+        )
         return LLaDAOGuiPrefix(
             image_ids=image_ids,
             image_positions=image_positions,
@@ -433,12 +479,8 @@ class LLaDAOGuiPrefixEncoder:
             source_width=int(source_size[0]),
             source_height=int(source_size[1]),
             prompt_ids=prompt_ids,
-            prompt_positions=list(
-                range(
-                    prompt_position_start,
-                    prompt_position_start + len(prompt_ids),
-                )
-            ),
+            prompt_positions=prompt_positions,
+            position_mode=position_mode,
         )
 
     @torch.inference_mode()
@@ -458,6 +500,7 @@ class LLaDAOGuiPrefixEncoder:
         prompt: str,
         *,
         tile_size: int = 980,
+        position_mode: str = "native",
     ) -> LLaDAOGuiPrefix:
         image = image.convert("RGB")
         width, height = image.size
@@ -468,4 +511,5 @@ class LLaDAOGuiPrefixEncoder:
             prompt,
             resize=False,
             source_size=(width, height),
+            position_mode=position_mode,
         )

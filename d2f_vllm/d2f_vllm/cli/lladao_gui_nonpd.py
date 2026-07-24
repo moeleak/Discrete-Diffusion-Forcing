@@ -39,6 +39,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument("--full-page-tile-size", type=int, default=980)
+    parser.add_argument(
+        "--full-page-position-mode",
+        choices=("native", "sequential"),
+        default="native",
+        help=(
+            "native shares one LLM RoPE position per image; sequential gives "
+            "every visual token an absolute position for long-RoPE experiments"
+        ),
+    )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--block-length", type=int, default=16)
     parser.add_argument("--block-add-threshold", type=float, default=0.1)
@@ -130,6 +139,7 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
                 full_page=args.full_page_tiles,
                 full_page_tile_size=args.full_page_tile_size,
+                full_page_position_mode=args.full_page_position_mode,
             ).to_dict()
     finally:
         engine.close()

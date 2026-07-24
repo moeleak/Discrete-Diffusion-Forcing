@@ -97,6 +97,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument("--full-page-tile-size", type=int, default=980)
+    parser.add_argument(
+        "--full-page-position-mode",
+        choices=("native", "sequential"),
+        default="native",
+        help=(
+            "native shares one LLM RoPE position per image; sequential gives "
+            "every visual token an absolute position for long-RoPE experiments"
+        ),
+    )
     parser.add_argument("--master-port", type=int, default=2333)
     parser.add_argument(
         "--attention-backend", choices=("sdpa", "flex"), default="sdpa"
@@ -288,6 +297,7 @@ def model_generate(
         max_iterations=args.max_iterations,
         full_page=full_page,
         full_page_tile_size=args.full_page_tile_size,
+        full_page_position_mode=args.full_page_position_mode,
     )
     return {
         "raw_text": output.text,
@@ -307,6 +317,9 @@ def model_generate(
         "source_height": output.source_height,
         "peak_memory_allocated_gib": output.peak_memory_allocated_gib,
         "peak_memory_reserved_gib": output.peak_memory_reserved_gib,
+        "position_mode": output.position_mode,
+        "max_prefill_position": output.max_prefill_position,
+        "max_generation_position": output.max_generation_position,
         "iterations": output.n_diff_steps,
         "trace": output.trace,
     }
@@ -393,6 +406,11 @@ def infer_one(
         "peak_memory_reserved_gib": result.get(
             "peak_memory_reserved_gib"
         ),
+        "position_mode": result.get("position_mode"),
+        "max_prefill_position": result.get("max_prefill_position"),
+        "max_generation_position": result.get(
+            "max_generation_position"
+        ),
         "convergence_steps": result["iterations"],
         "valid_tokens": len(result["tokens"]),
         "generated_tokens": args.max_new_tokens,
@@ -433,6 +451,9 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "source_height": None,
         "peak_memory_allocated_gib": None,
         "peak_memory_reserved_gib": None,
+        "position_mode": args.full_page_position_mode,
+        "max_prefill_position": None,
+        "max_generation_position": None,
         "convergence_steps": None,
         "valid_tokens": None,
         "generated_tokens": None,
@@ -481,6 +502,7 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         ),
         "full_page_tiles": args.full_page_tiles,
         "full_page_tile_size": args.full_page_tile_size,
+        "full_page_position_mode": args.full_page_position_mode,
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
         "kv_cache_compression": args.kv_cache_compression,

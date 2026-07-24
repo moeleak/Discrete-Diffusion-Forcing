@@ -12,9 +12,18 @@ MODE="${MODE:-yarn}"
 GPU="${GPU:-0}"
 MASTER_PORT="${MASTER_PORT:-32343}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/results/d2f-vllm-fullpage-${MODE}}"
-LOG="${LOG:-$ROOT/logs/d2f-vllm-fullpage-${MODE}-${RUN_ID}.log}"
-KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-1}"
+FULL_PAGE_POSITION_MODE="${FULL_PAGE_POSITION_MODE:-sequential}"
+KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-0}"
+if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
+  CACHE_TAG="kvcompress"
+elif [[ "$KV_CACHE_COMPRESSION" == "0" ]]; then
+  CACHE_TAG="nocompress"
+else
+  echo "KV_CACHE_COMPRESSION must be 0 or 1" >&2
+  exit 2
+fi
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/results/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${MODE}}"
+LOG="${LOG:-$ROOT/logs/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${MODE}-${RUN_ID}.log}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 KV_CACHE_CAPACITY="${KV_CACHE_CAPACITY:-65536}"
 
@@ -52,6 +61,7 @@ fi
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
+  echo "[$(date '+%F %T')] full_page_position_mode=$FULL_PAGE_POSITION_MODE kv_cache_compression=$KV_CACHE_COMPRESSION"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -75,6 +85,7 @@ fi
   --original-max-position-embeddings 16384 \
   --full-page-tiles \
   --full-page-tile-size 980 \
+  --full-page-position-mode "$FULL_PAGE_POSITION_MODE" \
   --master-port "$MASTER_PORT" \
   --attention-backend "$D2F_VLLM_ATTENTION_BACKEND" \
   --rms-norm-backend "$D2F_VLLM_RMS_NORM_BACKEND" \

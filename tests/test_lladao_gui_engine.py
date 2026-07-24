@@ -144,6 +144,46 @@ def test_full_page_tiles_cover_source_in_row_major_order():
     ]
 
 
+def test_native_multimodal_positions_share_one_position_per_image():
+    from d2f_vllm.multimodal.lladao_gui import (
+        build_multimodal_position_ids,
+    )
+
+    image, prompt = build_multimodal_position_ids(
+        [5, 3],
+        4,
+        mode="native",
+    )
+    assert image == [0] * 5 + [1] * 3
+    assert prompt == [2, 3, 4, 5]
+
+
+def test_sequential_multimodal_positions_reach_the_dense_token_length():
+    from d2f_vllm.multimodal.lladao_gui import (
+        build_multimodal_position_ids,
+    )
+
+    image, prompt = build_multimodal_position_ids(
+        [4_902] * 13,
+        100,
+        mode="sequential",
+    )
+    assert image[0] == 0
+    assert image[-1] == 63_725
+    assert prompt[0] == 63_726
+    assert prompt[-1] == 63_825
+    assert image + prompt == list(range(63_826))
+
+
+def test_multimodal_positions_reject_unknown_mode():
+    from d2f_vllm.multimodal.lladao_gui import (
+        build_multimodal_position_ids,
+    )
+
+    with pytest.raises(ValueError, match="native, sequential"):
+        build_multimodal_position_ids([5], 2, mode="compressed")
+
+
 def test_generation_attention_mask_is_block_causal():
     from d2f_vllm.lladao_gui_engine import build_generation_attention_mask
 

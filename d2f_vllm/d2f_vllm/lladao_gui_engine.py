@@ -81,6 +81,9 @@ class LLaDAOGuiEngineOutput:
     total_seconds: float
     peak_memory_allocated_gib: float
     peak_memory_reserved_gib: float
+    position_mode: str
+    max_prefill_position: int
+    max_generation_position: int
     trace: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
@@ -688,6 +691,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         max_iterations: int = 256,
         full_page: bool = False,
         full_page_tile_size: int = 980,
+        full_page_position_mode: str = "native",
     ) -> LLaDAOGuiEngineOutput:
         total_started = time.perf_counter()
         torch.cuda.reset_peak_memory_stats()
@@ -700,10 +704,15 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 image,
                 prompt,
                 tile_size=full_page_tile_size,
+                position_mode=full_page_position_mode,
             )
             if full_page
             else self.prefix_encoder.encode(image, prompt)
         )
+        if not full_page and full_page_position_mode != "native":
+            raise ValueError(
+                "full_page_position_mode requires full_page=True"
+            )
         torch.cuda.synchronize()
         full_length = prefix.length + max_new_tokens
         if full_length > self.config.max_model_len:
@@ -715,6 +724,17 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             raise ValueError(
                 f"image+prompt+generation length {full_length} exceeds "
                 f"kv_cache_capacity={self.kv_cache_capacity}"
+            )
+        max_prefill_position = max(
+            max(prefix.image_positions),
+            max(prefix.prompt_positions),
+        )
+        rope_start = prefix.prompt_positions[-1] + 1
+        max_generation_position = rope_start + max_new_tokens - 1
+        if max_generation_position >= self.config.max_model_len:
+            raise ValueError(
+                f"generation RoPE position {max_generation_position} exceeds "
+                f"max_model_len={self.config.max_model_len}"
             )
         pages_needed = math.ceil(full_length / self.page_size)
         page_ids = self._prefix_cache.allocate_pages(pages_needed)
@@ -797,7 +817,6 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             )
             tokens[0] = self.prefix_encoder.bos_token_id
             eos_token_id = self.prefix_encoder.eos_token_id
-            rope_start = prefix.prompt_positions[-1] + 1
             max_blocks = max_new_tokens // self.block_length
             states: list[dict[str, int]] = []
             blocks_added = 0
@@ -983,6 +1002,9 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 total_seconds=generation_finished - total_started,
                 peak_memory_allocated_gib=peak_allocated,
                 peak_memory_reserved_gib=peak_reserved,
+                position_mode=prefix.position_mode,
+                max_prefill_position=max_prefill_position,
+                max_generation_position=max_generation_position,
                 trace=trace,
             )
         finally:
