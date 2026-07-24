@@ -144,6 +144,40 @@ def test_full_page_tiles_cover_source_in_row_major_order():
     ]
 
 
+def test_full_page_truncation_keeps_complete_row_major_tiles():
+    from d2f_vllm.multimodal.lladao_gui import (
+        full_page_tile_token_length,
+        truncate_full_page_tile_boxes,
+    )
+
+    boxes = [
+        (0, 0, 980, 980),
+        (980, 0, 1_318, 980),
+        (0, 980, 980, 1_960),
+    ]
+    first = full_page_tile_token_length(boxes[0])
+    second = full_page_tile_token_length(boxes[1])
+    kept, used = truncate_full_page_tile_boxes(
+        boxes,
+        image_token_budget=first + second,
+    )
+    assert kept == boxes[:2]
+    assert used == first + second
+    assert full_page_tile_token_length((0, 0, 980, 980)) == 4_902
+
+
+def test_full_page_truncation_requires_one_complete_tile():
+    from d2f_vllm.multimodal.lladao_gui import (
+        truncate_full_page_tile_boxes,
+    )
+
+    with pytest.raises(ValueError, match="cannot fit one complete"):
+        truncate_full_page_tile_boxes(
+            [(0, 0, 980, 980)],
+            image_token_budget=4_901,
+        )
+
+
 def test_native_multimodal_positions_share_one_position_per_image():
     from d2f_vllm.multimodal.lladao_gui import (
         build_multimodal_position_ids,

@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--truncate-full-page-tiles",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "drop trailing complete full-resolution tiles until prompt and "
+            "generation fit the resident context capacity"
+        ),
+    )
+    parser.add_argument(
         "--full-page-position-mode",
         choices=("native", "strided", "sequential"),
         default="native",
@@ -177,6 +186,11 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "an extended unscaled run requires "
             "--allow-unscaled-max-model-len"
+        )
+    if args.full_page_overview and args.truncate_full_page_tiles:
+        parser.error(
+            "--full-page-overview and --truncate-full-page-tiles "
+            "are mutually exclusive"
         )
     for name in (
         "block_add_threshold",
@@ -395,6 +409,7 @@ def model_generate(
         full_page_tile_size=args.full_page_tile_size,
         full_page_position_mode=args.full_page_position_mode,
         full_page_overview=args.full_page_overview,
+        truncate_full_page_tiles=args.truncate_full_page_tiles,
     )
     return {
         "raw_text": output.text,
@@ -410,6 +425,8 @@ def model_generate(
         "vision_tiles": output.vision_tiles,
         "vision_selected_tiles": output.vision_selected_tiles,
         "input_images": output.input_images,
+        "source_images": output.source_images,
+        "truncated_images": output.truncated_images,
         "source_width": output.source_width,
         "source_height": output.source_height,
         "peak_memory_allocated_gib": output.peak_memory_allocated_gib,
@@ -438,6 +455,8 @@ def infer_one(
     if full_page and args.full_page_overview:
         prompt = overview_grounding_prompt(sample)
         runtime_input_protocol = "full_page_tiles_with_overview"
+    elif full_page and args.truncate_full_page_tiles:
+        runtime_input_protocol = "full_page_tiles_truncated"
     if args.backend == "d2f_vllm" and full_page:
         sequence = sample.get("sequence_tokens")
         expected_total = (
@@ -445,7 +464,8 @@ def infer_one(
         )
         capacity = args.kv_cache_capacity or args.max_model_len
         if (
-            isinstance(expected_total, (int, float))
+            not args.truncate_full_page_tiles
+            and isinstance(expected_total, (int, float))
             and expected_total > capacity
         ):
             raise ValueError(
@@ -498,6 +518,8 @@ def infer_one(
         "vision_tiles": result.get("vision_tiles"),
         "vision_selected_tiles": result.get("vision_selected_tiles"),
         "input_images": result.get("input_images"),
+        "source_images": result.get("source_images"),
+        "truncated_images": result.get("truncated_images"),
         "source_width": result.get("source_width"),
         "source_height": result.get("source_height"),
         "peak_memory_allocated_gib": result.get(
@@ -553,6 +575,8 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "vision_tiles": None,
         "vision_selected_tiles": None,
         "input_images": None,
+        "source_images": None,
+        "truncated_images": None,
         "source_width": None,
         "source_height": None,
         "peak_memory_allocated_gib": None,
@@ -611,6 +635,7 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "full_page_tile_size": args.full_page_tile_size,
         "full_page_position_mode": args.full_page_position_mode,
         "full_page_overview": args.full_page_overview,
+        "truncate_full_page_tiles": args.truncate_full_page_tiles,
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
         "kv_cache_compression": args.kv_cache_compression,

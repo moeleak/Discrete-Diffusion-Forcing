@@ -73,6 +73,8 @@ class LLaDAOGuiEngineOutput:
     vision_tiles: int
     vision_selected_tiles: int
     input_images: int
+    source_images: int
+    truncated_images: int
     source_width: int
     source_height: int
     image_seconds: float
@@ -693,6 +695,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         full_page_tile_size: int = 980,
         full_page_position_mode: str = "native",
         full_page_overview: bool = False,
+        truncate_full_page_tiles: bool = False,
     ) -> LLaDAOGuiEngineOutput:
         total_started = time.perf_counter()
         torch.cuda.reset_peak_memory_stats()
@@ -707,6 +710,11 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 tile_size=full_page_tile_size,
                 position_mode=full_page_position_mode,
                 include_overview=full_page_overview,
+                max_prefix_tokens=(
+                    self.kv_cache_capacity - max_new_tokens
+                    if truncate_full_page_tiles
+                    else None
+                ),
             )
             if full_page
             else self.prefix_encoder.encode(image, prompt)
@@ -717,6 +725,14 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             )
         if not full_page and full_page_overview:
             raise ValueError("full_page_overview requires full_page=True")
+        if not full_page and truncate_full_page_tiles:
+            raise ValueError(
+                "truncate_full_page_tiles requires full_page=True"
+            )
+        if full_page_overview and truncate_full_page_tiles:
+            raise ValueError(
+                "full-page overview and truncation are mutually exclusive"
+            )
         torch.cuda.synchronize()
         full_length = prefix.length + max_new_tokens
         if full_length > self.config.max_model_len:
@@ -998,6 +1014,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                     compression_stats["vision_selected_tiles"]
                 ),
                 input_images=len(prefix.image_spans),
+                source_images=prefix.source_images,
+                truncated_images=prefix.truncated_images,
                 source_width=prefix.source_width,
                 source_height=prefix.source_height,
                 image_seconds=image_cached - prefix_started,

@@ -16,6 +16,7 @@ INPUT_MODE="${INPUT_MODE:-}"
 LIMIT="${LIMIT:-}"
 FULL_PAGE_POSITION_MODE="${FULL_PAGE_POSITION_MODE:-sequential}"
 FULL_PAGE_OVERVIEW="${FULL_PAGE_OVERVIEW:-0}"
+FULL_PAGE_TRUNCATION="${FULL_PAGE_TRUNCATION:-0}"
 KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-0}"
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   CACHE_TAG="kvcompress"
@@ -87,8 +88,28 @@ else
   echo "FULL_PAGE_OVERVIEW must be 0 or 1" >&2
   exit 2
 fi
-if [[ "$MODE" == "original" && "$INPUT_MODE" != "native_resize" ]]; then
-  echo "MODE=original requires INPUT_MODE=native_resize" >&2
+if [[ "$FULL_PAGE_TRUNCATION" == "1" ]]; then
+  if [[ "$INPUT_MODE" != "full_page" ]]; then
+    echo "FULL_PAGE_TRUNCATION=1 requires INPUT_MODE=full_page" >&2
+    exit 2
+  fi
+  TRUNCATION_FLAG="--truncate-full-page-tiles"
+elif [[ "$FULL_PAGE_TRUNCATION" == "0" ]]; then
+  TRUNCATION_FLAG="--no-truncate-full-page-tiles"
+else
+  echo "FULL_PAGE_TRUNCATION must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$FULL_PAGE_OVERVIEW" == "1" && "$FULL_PAGE_TRUNCATION" == "1" ]]; then
+  echo "full-page overview and truncation are mutually exclusive" >&2
+  exit 2
+fi
+if [[
+  "$MODE" == "original"
+  && "$INPUT_MODE" == "full_page"
+  && "$FULL_PAGE_TRUNCATION" != "1"
+]]; then
+  echo "MODE=original with full-page input requires FULL_PAGE_TRUNCATION=1" >&2
   exit 2
 fi
 
@@ -110,7 +131,7 @@ fi
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -137,6 +158,7 @@ fi
   --full-page-tile-size 980 \
   --full-page-position-mode "$FULL_PAGE_POSITION_MODE" \
   "$OVERVIEW_FLAG" \
+  "$TRUNCATION_FLAG" \
   --master-port "$MASTER_PORT" \
   --attention-backend "$D2F_VLLM_ATTENTION_BACKEND" \
   --rms-norm-backend "$D2F_VLLM_RMS_NORM_BACKEND" \

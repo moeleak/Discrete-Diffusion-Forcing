@@ -203,6 +203,8 @@ class LLaDAOGuiPrefix:
     prompt_ids: list[int]
     prompt_positions: list[int]
     position_mode: str = "native"
+    source_images: int = 1
+    truncated_images: int = 0
 
     @property
     def length(self) -> int:
@@ -229,6 +231,51 @@ def full_page_tile_boxes(
         for top in range(0, height, tile_size)
         for left in range(0, width, tile_size)
     ]
+
+
+def full_page_tile_token_length(
+    box: Sequence[int],
+    patch_size: int = 14,
+) -> int:
+    """Return exact padded patch tokens plus two image boundary tokens."""
+
+    if len(box) != 4:
+        raise ValueError("tile box must contain four coordinates")
+    left, top, right, bottom = (int(value) for value in box)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0 or patch_size <= 0:
+        raise ValueError("tile dimensions and patch_size must be positive")
+    grid_width = (width + patch_size - 1) // patch_size
+    grid_height = (height + patch_size - 1) // patch_size
+    return grid_width * grid_height + 2
+
+
+def truncate_full_page_tile_boxes(
+    boxes: Sequence[Sequence[int]],
+    *,
+    image_token_budget: int,
+    patch_size: int = 14,
+) -> tuple[list[tuple[int, int, int, int]], int]:
+    """Keep the longest row-major tile prefix that fits complete images."""
+
+    budget = int(image_token_budget)
+    if budget <= 0:
+        raise ValueError("image_token_budget must be positive")
+    kept: list[tuple[int, int, int, int]] = []
+    used = 0
+    for raw_box in boxes:
+        box = tuple(int(value) for value in raw_box)
+        length = full_page_tile_token_length(box, patch_size)
+        if used + length > budget:
+            break
+        kept.append(box)
+        used += length
+    if not kept:
+        raise ValueError(
+            "full-page token budget cannot fit one complete image tile"
+        )
+    return kept, used
 
 
 def build_multimodal_position_ids(
@@ -419,9 +466,19 @@ class LLaDAOGuiPrefixEncoder:
         resize: bool,
         source_size: tuple[int, int],
         position_mode: str = "native",
+        source_image_count: int | None = None,
     ) -> LLaDAOGuiPrefix:
         if not images:
             raise ValueError("at least one image is required")
+        source_images = (
+            len(images)
+            if source_image_count is None
+            else int(source_image_count)
+        )
+        if source_images < len(images):
+            raise ValueError(
+                "source_image_count cannot be smaller than encoded images"
+            )
         boundary_ids = torch.tensor(
             [self.start_image_id, self.end_image_id],
             dtype=torch.long,
@@ -485,6 +542,8 @@ class LLaDAOGuiPrefixEncoder:
             prompt_ids=prompt_ids,
             prompt_positions=prompt_positions,
             position_mode=position_mode,
+            source_images=source_images,
+            truncated_images=source_images - len(images),
         )
 
     @torch.inference_mode()
@@ -506,10 +565,27 @@ class LLaDAOGuiPrefixEncoder:
         tile_size: int = 980,
         position_mode: str = "native",
         include_overview: bool = False,
+        max_prefix_tokens: int | None = None,
     ) -> LLaDAOGuiPrefix:
         image = image.convert("RGB")
         width, height = image.size
         boxes = full_page_tile_boxes(width, height, tile_size)
+        source_image_count = len(boxes)
+        if max_prefix_tokens is not None:
+            if include_overview:
+                raise ValueError(
+                    "full-page truncation cannot be combined with overview"
+                )
+            prompt_token_length = (
+                len(self.tokenizer.encode(prompt, add_special_tokens=False))
+                + 2
+            )
+            image_token_budget = int(max_prefix_tokens) - prompt_token_length
+            boxes, _ = truncate_full_page_tile_boxes(
+                boxes,
+                image_token_budget=image_token_budget,
+                patch_size=self.patch_size,
+            )
         images = [(image.crop(box), box) for box in boxes]
         if include_overview:
             # Keep every source pixel in the exact full-resolution tiles, then
@@ -522,4 +598,9 @@ class LLaDAOGuiPrefixEncoder:
             resize=False,
             source_size=(width, height),
             position_mode=position_mode,
+            source_image_count=(
+                source_image_count + 1
+                if include_overview
+                else source_image_count
+            ),
         )

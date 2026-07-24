@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--truncate-full-page-tiles",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "drop trailing complete full-resolution tiles until the prompt "
+            "and generation fit the resident context capacity"
+        ),
+    )
+    parser.add_argument(
         "--full-page-position-mode",
         choices=("native", "strided", "sequential"),
         default="native",
@@ -151,6 +160,7 @@ def main() -> None:
                 full_page_tile_size=args.full_page_tile_size,
                 full_page_position_mode=args.full_page_position_mode,
                 full_page_overview=args.full_page_overview,
+                truncate_full_page_tiles=args.truncate_full_page_tiles,
             ).to_dict()
     finally:
         engine.close()
