@@ -244,7 +244,7 @@ rate. The native D2F plus OCR retrieval-crop pipeline below scored 80% SSR on
 the identical sample IDs. These are full-page deployment diagnostics, not
 paper-comparable cropped Mind2Web results.
 
-### Three-way comparison on 100 native-16K full-page samples
+### Four-way comparison on 100 native-16K full-page samples
 
 The long-page results above use a set selected specifically above 16K. For a
 comparison that starts with complete original-resolution pages inside the
@@ -274,7 +274,7 @@ cd "$LLADAO"
 The selected full-resolution sequences contain 7,319–16,252 tokens, with 67
 domain, 18 task, and 15 website samples. The selected-ID SHA-256 is
 `273ce580bbb036230088d4aab84dd34fdc01f0c3e312ed7c7bfa47a2a55e8e9f`.
-Run all three arms against that exact benchmark root:
+Run all four arms against that exact benchmark root:
 
 ```bash
 ROOT=/home/ma-user/work/LLaDA-o
@@ -296,6 +296,12 @@ BENCHMARK_ROOT="$BENCHMARK_ROOT" \
 RESULT_ROOT="$COMPARE/yarn128k-uncropped" \
   bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_ocr.sh
 
+# YaRN 128K: exact original tiles, no overview, crop, or truncation.
+LIMIT=100 GPU=0 KV_CACHE_CAPACITY=32768 \
+BENCHMARK_ROOT="$BENCHMARK_ROOT" \
+RESULT_ROOT="$COMPARE/yarn128k-fullres-no-truncation" \
+  bash d2f_vllm/mllm_lladao_gui_yarn_fullres_no_truncation_ocr.sh
+
 # No YaRN: exact full-resolution tiles, native 16K positions, tail truncation.
 LIMIT=100 GPU=0 \
 BENCHMARK_ROOT="$BENCHMARK_ROOT" \
@@ -309,6 +315,7 @@ All arms disable KV compression and use the same 100 sample IDs:
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Native D2F + OCR retrieval crop | 70% | **72%** | 72% | 100% | 100% | 2,663–4,972 | 83 |
 | YaRN 128K + OCR, no target crop | 44% | **66%** | 66% | 100% | 99% | 11,475–18,868 | 18,867 |
+| YaRN 128K + OCR, exact original tiles only | 1% | **64%** | 64% | 100% | 98% | 7,319–16,252 | 16,251 |
 | Native 16K + OCR, full-resolution tiles | 2% | **63%** | 63% | 100% | 100% | 7,319–16,252 | 152 |
 
 The native-16K full-resolution launcher reserves prompt and 64 generation
@@ -319,10 +326,15 @@ test reduced 12 source tiles to four complete tiles, produced a 13,445-token
 sequence, and kept the maximum generation position at 140 with no RoPE
 scaling.
 
-The final columns include prompt-only OCR. The YaRN arm also adds a resized
-whole-page overview, while the native full-resolution arm does not, so their
-three-point difference is a deployment comparison and must not be attributed
-to YaRN alone. OCR and crop selection use no ground-truth target location.
+The final columns include prompt-only OCR. The first YaRN arm adds a resized
+whole-page overview. The second YaRN arm uses only the exact source tiles:
+`full_page_overview=false`, `truncate_full_page_tiles=false`, `strided`
+positions, and a dense KV ratio of 1.0. It consumed all four to six source
+tiles for every sample, with zero truncated tiles and no errors. Its maximum
+position was 16,251, still inside the original 16,384-position window, so this
+arm validates the requested deployment configuration but is not a long-RoPE
+extrapolation result. OCR and crop selection use no ground-truth target
+location.
 
 For controls whose visible label is adjacent to rather than inside the
 clickable box, run the complete two-stage retrieval-crop pipeline:
