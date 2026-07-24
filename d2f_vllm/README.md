@@ -138,6 +138,15 @@ records the dense runtime token count, `position_mode`,
 native positions, samples at or below 16K, compressed KV, mismatched seeds, or
 mismatched runtime token counts.
 
+For the validated first 100 samples, every actual generation position was
+between 16,619 and 62,464. Unscaled 128K scored 1% SSR and YaRN 128K scored 0%
+SSR. This does not isolate a YaRN implementation failure: both arms collapse
+after changing the checkpoint-native shared visual position into untrained
+sequential positions and asking a single-image GUI checkpoint to localize over
+multiple full-page tiles. The YaRN inverse frequencies, attention scale, and
+cos/sin cache were separately checked against Transformers 4.57.6 through
+position 131,071 and matched exactly.
+
 ### Controlled YaRN isolation
 
 To measure whether static YaRN perturbs inputs that remain inside the
