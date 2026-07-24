@@ -244,6 +244,86 @@ rate. The native D2F plus OCR retrieval-crop pipeline below scored 80% SSR on
 the identical sample IDs. These are full-page deployment diagnostics, not
 paper-comparable cropped Mind2Web results.
 
+### Three-way comparison on 100 native-16K full-page samples
+
+The long-page results above use a set selected specifically above 16K. For a
+comparison that starts with complete original-resolution pages inside the
+checkpoint's native limit, rebuild the source set with an inclusive 16,384
+token ceiling and freeze a deterministic random subset:
+
+```bash
+ROOT=/home/ma-user/work/LLaDA-o
+LLADAO=$ROOT/src/LLaDA-o
+PYTHON=$ROOT/env/bin/python
+
+cd "$LLADAO"
+"$PYTHON" scripts/data/prepare_gui_grounding_benchmarks.py build-fullpage \
+  --root "$ROOT/data/mind2web-fullpage-native16k" \
+  --raw-root "$ROOT/data/bench_raw/raw/mind2web" \
+  --tokenizer "$ROOT/models/lladao-gui-d2f-vllm-step1377-exact" \
+  --min-total-tokens 0 \
+  --max-total-tokens 16384
+
+"$PYTHON" scripts/data/select_gui_grounding_subset.py \
+  --source-root "$ROOT/data/mind2web-fullpage-native16k" \
+  --output-root "$ROOT/data/mind2web-fullpage-native16k-n100-seed42" \
+  --count 100 \
+  --seed 42
+```
+
+The selected full-resolution sequences contain 7,319–16,252 tokens, with 67
+domain, 18 task, and 15 website samples. The selected-ID SHA-256 is
+`273ce580bbb036230088d4aab84dd34fdc01f0c3e312ed7c7bfa47a2a55e8e9f`.
+Run all three arms against that exact benchmark root:
+
+```bash
+ROOT=/home/ma-user/work/LLaDA-o
+REPO=$ROOT/src/Discrete-Diffusion-Forcing
+BENCHMARK_ROOT=$ROOT/data/mind2web-fullpage-native16k-n100-seed42
+COMPARE=$ROOT/results/compare-native16k-seed42
+
+cd "$REPO"
+
+# Native D2F, full-page OCR retrieval, and OCR-selected 980px crop.
+LIMIT=100 GPU=0 \
+BENCHMARK_ROOT="$BENCHMARK_ROOT" \
+RESULT_ROOT="$COMPARE/native-ocr-crop" \
+  bash d2f_vllm/mllm_lladao_gui_ocr_crop_pipeline.sh
+
+# YaRN 128K, all exact tiles plus a resized full-page coordinate overview.
+LIMIT=100 GPU=0 KV_CACHE_CAPACITY=32768 \
+BENCHMARK_ROOT="$BENCHMARK_ROOT" \
+RESULT_ROOT="$COMPARE/yarn128k-uncropped" \
+  bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_ocr.sh
+
+# No YaRN: exact full-resolution tiles, native 16K positions, tail truncation.
+LIMIT=100 GPU=0 \
+BENCHMARK_ROOT="$BENCHMARK_ROOT" \
+RESULT_ROOT="$COMPARE/native16k-fullres-truncated" \
+  bash d2f_vllm/mllm_lladao_gui_native_fullres_truncated_ocr.sh
+```
+
+All arms disable KV compression and use the same 100 sample IDs:
+
+| Configuration | Raw SSR | Final SSR | Joint SSR | Action F1 | Parse | Runtime tokens | Max RoPE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Native D2F + OCR retrieval crop | 70% | **72%** | 72% | 100% | 100% | 2,663–4,972 | 83 |
+| YaRN 128K + OCR, no target crop | 44% | **66%** | 66% | 100% | 99% | 11,475–18,868 | 18,867 |
+| Native 16K + OCR, full-resolution tiles | 2% | **63%** | 63% | 100% | 100% | 7,319–16,252 | 152 |
+
+The native-16K full-resolution launcher reserves prompt and 64 generation
+tokens, then drops only complete trailing tiles if an input exceeds capacity;
+it never cuts through one image's visual tokens. No selected sample triggered
+that fallback (`truncated_images=0` for all 100). A separate overlength smoke
+test reduced 12 source tiles to four complete tiles, produced a 13,445-token
+sequence, and kept the maximum generation position at 140 with no RoPE
+scaling.
+
+The final columns include prompt-only OCR. The YaRN arm also adds a resized
+whole-page overview, while the native full-resolution arm does not, so their
+three-point difference is a deployment comparison and must not be attributed
+to YaRN alone. OCR and crop selection use no ground-truth target location.
+
 For controls whose visible label is adjacent to rather than inside the
 clickable box, run the complete two-stage retrieval-crop pipeline:
 

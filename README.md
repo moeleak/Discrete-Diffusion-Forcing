@@ -380,6 +380,22 @@ See [the long-context benchmark guide](d2f_vllm/README.md#uncropped-yarn-128k-wi
 for the detached launch command, log paths, output layout, memory warning, and
 comparison with the 80% native OCR retrieval-crop pipeline.
 
+For original-resolution pages without YaRN or position extrapolation, enable
+the native-16K tile-boundary truncation launcher:
+
+```shell
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+LIMIT=100 GPU=0 \
+BENCHMARK_ROOT=/home/ma-user/work/LLaDA-o/data/mind2web-fullpage-native16k-n100-seed42 \
+  bash d2f_vllm/mllm_lladao_gui_native_fullres_truncated_ocr.sh
+```
+
+On the frozen seed-42 set of 100 complete pages below 16K, native OCR-crop,
+uncropped YaRN, and uncropped native-16K scored 72%, 66%, and 63% SSR,
+respectively. See [the three-way protocol and table](d2f_vllm/README.md#three-way-comparison-on-100-native-16k-full-page-samples)
+for dataset selection, exact commands, raw scores, position ranges, and the
+truncation audit.
+
 The launcher uses vLLM's fused CUDA RMSNorm by default. It keeps BF16 inputs
 and FP32 accumulation, and the 100-sample paired gate retains 80% SSR and 100%
 action F1. Set `D2F_VLLM_RMS_NORM_BACKEND=torch` to reproduce the unfused
