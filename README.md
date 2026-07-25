@@ -390,20 +390,21 @@ BENCHMARK_ROOT=/home/ma-user/work/LLaDA-o/data/mind2web-fullpage-native16k-n100-
   bash d2f_vllm/mllm_lladao_gui_native_fullres_truncated_ocr.sh
 ```
 
-To keep the same exact original-resolution tiles while enabling YaRN, without
-adding an overview or allowing tile truncation, run:
+For the prefiltered native-16K set, keep the same exact original-resolution
+tiles while disabling both YaRN and tile truncation:
 
 ```shell
 cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
-LIMIT=100 GPU=0 KV_CACHE_CAPACITY=32768 \
+LIMIT=100 GPU=0 \
 BENCHMARK_ROOT=/home/ma-user/work/LLaDA-o/data/mind2web-fullpage-native16k-n100-seed42 \
-  bash d2f_vllm/mllm_lladao_gui_yarn_fullres_no_truncation_ocr.sh
+  bash d2f_vllm/mllm_lladao_gui_native_fullres_no_truncation_ocr.sh
 ```
 
 On the frozen seed-42 set of 100 complete pages below 16K, native OCR-crop,
-YaRN with an overview, YaRN with exact original tiles only, and native-16K
-with exact tiles scored 72%, 66%, 64%, and 63% SSR, respectively. See
-[the four-way protocol and table](d2f_vllm/README.md#four-way-comparison-on-100-native-16k-full-page-samples)
+YaRN with an overview, native RoPE with exact strided tiles, YaRN with the
+same exact strided tiles, and native multimodal positions scored 72%, 66%,
+65%, 64%, and 63% SSR, respectively. See
+[the five-way protocol and table](d2f_vllm/README.md#five-way-comparison-on-100-native-16k-full-page-samples)
 for dataset selection, exact commands, raw scores, position ranges, and the
 truncation audit.
 
