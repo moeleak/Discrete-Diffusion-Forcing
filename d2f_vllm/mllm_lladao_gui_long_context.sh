@@ -17,6 +17,7 @@ LIMIT="${LIMIT:-}"
 FULL_PAGE_POSITION_MODE="${FULL_PAGE_POSITION_MODE:-sequential}"
 FULL_PAGE_OVERVIEW="${FULL_PAGE_OVERVIEW:-0}"
 FULL_PAGE_TRUNCATION="${FULL_PAGE_TRUNCATION:-0}"
+ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE="${ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE:-0}"
 KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-0}"
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   CACHE_TAG="kvcompress"
@@ -105,11 +106,19 @@ if [[ "$FULL_PAGE_OVERVIEW" == "1" && "$FULL_PAGE_TRUNCATION" == "1" ]]; then
   exit 2
 fi
 if [[
+  "$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE" != "0"
+  && "$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE" != "1"
+]]; then
+  echo "ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE must be 0 or 1" >&2
+  exit 2
+fi
+if [[
   "$MODE" == "original"
   && "$INPUT_MODE" == "full_page"
   && "$FULL_PAGE_TRUNCATION" != "1"
+  && "$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE" != "1"
 ]]; then
-  echo "MODE=original with full-page input requires FULL_PAGE_TRUNCATION=1" >&2
+  echo "MODE=original with full-page input requires FULL_PAGE_TRUNCATION=1 or an explicitly prefiltered benchmark" >&2
   exit 2
 fi
 
@@ -131,7 +140,7 @@ fi
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
