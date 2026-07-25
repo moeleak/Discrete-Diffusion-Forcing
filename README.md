@@ -380,6 +380,20 @@ See [the long-context benchmark guide](d2f_vllm/README.md#uncropped-yarn-128k-wi
 for the detached launch command, log paths, output layout, memory warning, and
 comparison with the 80% native OCR retrieval-crop pipeline.
 
+For unscaled 128K extrapolation without YaRN, overview, crop, truncation, or
+KV compression, run:
+
+```shell
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+LIMIT=100 GPU=0 KV_CACHE_CAPACITY=65536 \
+  bash d2f_vllm/mllm_lladao_gui_unscaled_fullres_no_truncation_ocr.sh
+```
+
+On the identical first 100 long-page samples used by the YaRN overview row,
+the exact source tiles produced real positions from 16,619 to 62,464. The raw
+model scored 2% SSR; prompt-only OCR produced 74% SSR, 74% joint SSR, 100%
+action F1, and a 100% parse rate.
+
 For original-resolution pages without YaRN or position extrapolation, enable
 the native-16K tile-boundary truncation launcher:
 

@@ -147,6 +147,25 @@ multiple full-page tiles. The YaRN inverse frequencies, attention scale, and
 cos/sin cache were separately checked against Transformers 4.57.6 through
 position 131,071 and matched exactly.
 
+### Unscaled 128K full-page OCR
+
+To extrapolate the checkpoint's original RoPE directly, without YaRN scaling,
+retain only the exact source tiles and run:
+
+```bash
+LIMIT=100 GPU=0 KV_CACHE_CAPACITY=65536 \
+  bash d2f_vllm/mllm_lladao_gui_unscaled_fullres_no_truncation_ocr.sh
+```
+
+This deployment diagnostic sets `rope_scaling=none`, advertises 131,072
+positions with the explicit unscaled override, uses `strided` full-page
+positions, and disables overview, crop, tile truncation, and KV compression.
+On the same first 100 long-page sample IDs as the YaRN overview result, every
+source tile was retained and actual generation positions ranged from 16,619
+to 62,464. The raw model scored 2% SSR. Prompt-only OCR scored 74% SSR, 74%
+joint SSR, 100% action F1, and a 100% parse rate. OCR uses no ground-truth
+target location.
+
 ### Controlled YaRN isolation
 
 To measure whether static YaRN perturbs inputs that remain inside the
