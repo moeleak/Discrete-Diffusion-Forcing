@@ -263,6 +263,59 @@ rate. The native D2F plus OCR retrieval-crop pipeline below scored 80% SSR on
 the identical sample IDs. These are full-page deployment diagnostics, not
 paper-comparable cropped Mind2Web results.
 
+### Whole-image KV retrieval without KV compression
+
+The retrieval variant starts from the uncropped YaRN protocol above. It scores
+each exact source tile independently with the same causal prompt
+self-information criterion used by the engine-side chunk selector, retains
+the top four complete image spans, and force-keeps the resized whole-page
+overview. Selection never drops individual patch tokens, layers, or KV heads,
+so this mode is mutually exclusive with `KV_CACHE_COMPRESSION=1`.
+
+```bash
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+
+LIMIT=100 \
+GPU=0 \
+KV_RETRIEVAL_TOPK_IMAGES=4 \
+RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-kvretrieve4-ocr-n100 \
+MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-model.log \
+OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-ocr.log \
+nohup bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh \
+  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-launcher.log 2>&1 &
+```
+
+Monitor and inspect it with:
+
+```bash
+tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-model.log
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+path = Path(
+    "/home/ma-user/work/LLaDA-o/results/"
+    "yarn128k-uncropped-kvretrieve4-ocr-n100/model/"
+    "mind2web_fullpage/part-00000.jsonl"
+)
+record = json.loads(path.read_text().splitlines()[0])
+for key in (
+    "kv_cache_retrieval_indices",
+    "kv_cache_retrieval_ratio",
+    "kv_cache_retrieval_seconds",
+    "kv_cache_compression_ratio",
+):
+    print(key, record[key])
+PY
+```
+
+The retrieval ratio measures selected whole-span KV relative to the dense
+full-page prefix. It is not the compression ratio. A valid run must report
+`kv_cache_retrieval_enabled=true`, the requested source-tile Top-K plus the
+forced overview, `kv_cache_compression_ratio=1.0`, and
+`kv_cache_compression_seconds=0.0`.
+
 ### Five-way comparison on 100 native-16K full-page samples
 
 The long-page results above use a set selected specifically above 16K. For a

@@ -19,6 +19,9 @@ FULL_PAGE_OVERVIEW="${FULL_PAGE_OVERVIEW:-0}"
 FULL_PAGE_TRUNCATION="${FULL_PAGE_TRUNCATION:-0}"
 ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE="${ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE:-0}"
 KV_CACHE_COMPRESSION="${KV_CACHE_COMPRESSION:-0}"
+KV_CACHE_RETRIEVAL="${KV_CACHE_RETRIEVAL:-0}"
+KV_RETRIEVAL_TOPK_IMAGES="${KV_RETRIEVAL_TOPK_IMAGES:-4}"
+KV_RETRIEVAL_KEEP_OVERVIEW="${KV_RETRIEVAL_KEEP_OVERVIEW:-1}"
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   CACHE_TAG="kvcompress"
 elif [[ "$KV_CACHE_COMPRESSION" == "0" ]]; then
@@ -27,8 +30,31 @@ else
   echo "KV_CACHE_COMPRESSION must be 0 or 1" >&2
   exit 2
 fi
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/results/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${MODE}}"
-LOG="${LOG:-$ROOT/logs/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${MODE}-${RUN_ID}.log}"
+if [[ "$KV_CACHE_RETRIEVAL" == "1" ]]; then
+  RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}"
+elif [[ "$KV_CACHE_RETRIEVAL" == "0" ]]; then
+  RETRIEVAL_TAG="noretrieve"
+else
+  echo "KV_CACHE_RETRIEVAL must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$KV_CACHE_COMPRESSION" == "1" && "$KV_CACHE_RETRIEVAL" == "1" ]]; then
+  echo "KV cache retrieval and compression are mutually exclusive" >&2
+  exit 2
+fi
+if ! [[ "$KV_RETRIEVAL_TOPK_IMAGES" =~ ^[0-9]+$ ]]; then
+  echo "KV_RETRIEVAL_TOPK_IMAGES must be a non-negative integer" >&2
+  exit 2
+fi
+if [[
+  "$KV_RETRIEVAL_KEEP_OVERVIEW" != "0"
+  && "$KV_RETRIEVAL_KEEP_OVERVIEW" != "1"
+]]; then
+  echo "KV_RETRIEVAL_KEEP_OVERVIEW must be 0 or 1" >&2
+  exit 2
+fi
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/results/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${RETRIEVAL_TAG}-${MODE}}"
+LOG="${LOG:-$ROOT/logs/d2f-vllm-fullpage-${FULL_PAGE_POSITION_MODE}-${CACHE_TAG}-${RETRIEVAL_TAG}-${MODE}-${RUN_ID}.log}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 KV_CACHE_CAPACITY="${KV_CACHE_CAPACITY:-65536}"
 
@@ -136,11 +162,21 @@ if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
 else
   COMPRESSION_FLAG="--no-kv-cache-compression"
 fi
+if [[ "$KV_CACHE_RETRIEVAL" == "1" ]]; then
+  RETRIEVAL_FLAG="--kv-cache-retrieval"
+else
+  RETRIEVAL_FLAG="--no-kv-cache-retrieval"
+fi
+if [[ "$KV_RETRIEVAL_KEEP_OVERVIEW" == "1" ]]; then
+  RETRIEVAL_OVERVIEW_FLAG="--kv-retrieval-keep-overview"
+else
+  RETRIEVAL_OVERVIEW_FLAG="--no-kv-retrieval-keep-overview"
+fi
 
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION limit=${LIMIT:-all}"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION kv_cache_retrieval=$KV_CACHE_RETRIEVAL kv_retrieval_topk_images=$KV_RETRIEVAL_TOPK_IMAGES kv_retrieval_keep_overview=$KV_RETRIEVAL_KEEP_OVERVIEW limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -172,6 +208,9 @@ fi
   --attention-backend "$D2F_VLLM_ATTENTION_BACKEND" \
   --rms-norm-backend "$D2F_VLLM_RMS_NORM_BACKEND" \
   "$COMPRESSION_FLAG" \
+  "$RETRIEVAL_FLAG" \
+  --kv-retrieval-topk-images "$KV_RETRIEVAL_TOPK_IMAGES" \
+  "$RETRIEVAL_OVERVIEW_FLAG" \
   --vision-tile-size 16 \
   --vision-topk-tiles 20 \
   --vision-token-keep-ratio 0.75 \

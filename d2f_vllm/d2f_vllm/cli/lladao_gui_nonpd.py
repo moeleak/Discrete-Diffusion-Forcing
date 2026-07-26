@@ -83,6 +83,21 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--kv-cache-retrieval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "retrieve complete image KV spans by prompt self-information; "
+            "does not evict tokens within a selected span"
+        ),
+    )
+    parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
+    parser.add_argument(
+        "--kv-retrieval-keep-overview",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--vision-tile-size", type=int, default=16)
     parser.add_argument("--vision-topk-tiles", type=int, default=20)
     parser.add_argument("--vision-token-keep-ratio", type=float, default=0.75)
@@ -99,6 +114,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.kv_cache_retrieval and args.kv_cache_compression:
+        raise SystemExit(
+            "--kv-cache-retrieval and --kv-cache-compression are mutually "
+            "exclusive"
+        )
     if (
         args.max_model_len > args.original_max_position_embeddings
         and args.rope_scaling == "none"
@@ -113,6 +133,7 @@ def main() -> None:
     from d2f_vllm.lladao_gui_engine import (
         LLaDAOGuiD2FEngine,
         LLaDAOGuiKVCompressionConfig,
+        LLaDAOGuiKVRetrievalConfig,
     )
     rope_scaling = None
     if args.rope_scaling == "yarn":
@@ -148,6 +169,11 @@ def main() -> None:
             vision_score_layers=args.vision_score_layers,
             vision_score_layer_mode=args.vision_score_layer_mode,
             vision_score_pool_kernel=args.vision_score_pool_kernel,
+        ),
+        kv_retrieval=LLaDAOGuiKVRetrievalConfig(
+            enabled=args.kv_cache_retrieval,
+            topk_images=args.kv_retrieval_topk_images,
+            keep_overview=args.kv_retrieval_keep_overview,
         ),
     )
     try:

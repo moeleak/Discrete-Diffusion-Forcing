@@ -380,6 +380,21 @@ See [the long-context benchmark guide](d2f_vllm/README.md#uncropped-yarn-128k-wi
 for the detached launch command, log paths, output layout, memory warning, and
 comparison with the 80% native OCR retrieval-crop pipeline.
 
+To add whole-image KV retrieval to that exact uncropped YaRN configuration
+while keeping token/head-level KV compression disabled, run:
+
+```shell
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+LIMIT=100 GPU=0 KV_RETRIEVAL_TOPK_IMAGES=4 \
+  bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh
+```
+
+The runtime ranks each original full-resolution image tile by causal prompt
+self-information, keeps all KV tokens from the top four tiles, and always
+keeps the whole-page overview as the coordinate anchor. It records retrieval
+indices, scores, latency, and resident/dense prefix ratio separately from KV
+compression; `kv_cache_compression_ratio` remains 1.0.
+
 For unscaled 128K extrapolation without YaRN, overview, crop, truncation, or
 KV compression, run:
 

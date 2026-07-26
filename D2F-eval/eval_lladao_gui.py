@@ -141,6 +141,21 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--kv-cache-retrieval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "retrieve complete image KV spans by prompt self-information; "
+            "selected spans retain every token, layer, and KV head"
+        ),
+    )
+    parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
+    parser.add_argument(
+        "--kv-retrieval-keep-overview",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--vision-tile-size", type=int, default=16)
     parser.add_argument("--vision-topk-tiles", type=int, default=20)
     parser.add_argument("--vision-token-keep-ratio", type=float, default=0.75)
@@ -192,6 +207,13 @@ def parse_args() -> argparse.Namespace:
             "--full-page-overview and --truncate-full-page-tiles "
             "are mutually exclusive"
         )
+    if args.kv_cache_retrieval and args.kv_cache_compression:
+        parser.error(
+            "--kv-cache-retrieval and --kv-cache-compression are mutually "
+            "exclusive"
+        )
+    if args.kv_retrieval_topk_images < 0:
+        parser.error("--kv-retrieval-topk-images must be non-negative")
     for name in (
         "block_add_threshold",
         "decoded_token_threshold",
@@ -422,6 +444,15 @@ def model_generate(
         "cached_prefix_tokens": output.cached_prefix_tokens,
         "kv_cache_compression_ratio": output.kv_cache_compression_ratio,
         "kv_cache_compression_seconds": output.kv_cache_compression_seconds,
+        "kv_cache_retrieval_enabled": output.kv_cache_retrieval_enabled,
+        "kv_cache_retrieval_candidates": (
+            output.kv_cache_retrieval_candidates
+        ),
+        "kv_cache_retrieval_selected": output.kv_cache_retrieval_selected,
+        "kv_cache_retrieval_indices": output.kv_cache_retrieval_indices,
+        "kv_cache_retrieval_scores": output.kv_cache_retrieval_scores,
+        "kv_cache_retrieval_ratio": output.kv_cache_retrieval_ratio,
+        "kv_cache_retrieval_seconds": output.kv_cache_retrieval_seconds,
         "vision_tiles": output.vision_tiles,
         "vision_selected_tiles": output.vision_selected_tiles,
         "input_images": output.input_images,
@@ -465,6 +496,7 @@ def infer_one(
         capacity = args.kv_cache_capacity or args.max_model_len
         if (
             not args.truncate_full_page_tiles
+            and not args.kv_cache_retrieval
             and isinstance(expected_total, (int, float))
             and expected_total > capacity
         ):
@@ -514,6 +546,27 @@ def infer_one(
         "kv_cache_compression_ratio": result.get("kv_cache_compression_ratio"),
         "kv_cache_compression_seconds": result.get(
             "kv_cache_compression_seconds"
+        ),
+        "kv_cache_retrieval_enabled": result.get(
+            "kv_cache_retrieval_enabled"
+        ),
+        "kv_cache_retrieval_candidates": result.get(
+            "kv_cache_retrieval_candidates"
+        ),
+        "kv_cache_retrieval_selected": result.get(
+            "kv_cache_retrieval_selected"
+        ),
+        "kv_cache_retrieval_indices": result.get(
+            "kv_cache_retrieval_indices"
+        ),
+        "kv_cache_retrieval_scores": result.get(
+            "kv_cache_retrieval_scores"
+        ),
+        "kv_cache_retrieval_ratio": result.get(
+            "kv_cache_retrieval_ratio"
+        ),
+        "kv_cache_retrieval_seconds": result.get(
+            "kv_cache_retrieval_seconds"
         ),
         "vision_tiles": result.get("vision_tiles"),
         "vision_selected_tiles": result.get("vision_selected_tiles"),
@@ -572,6 +625,13 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "cached_prefix_tokens": None,
         "kv_cache_compression_ratio": None,
         "kv_cache_compression_seconds": None,
+        "kv_cache_retrieval_enabled": args.kv_cache_retrieval,
+        "kv_cache_retrieval_candidates": None,
+        "kv_cache_retrieval_selected": None,
+        "kv_cache_retrieval_indices": None,
+        "kv_cache_retrieval_scores": None,
+        "kv_cache_retrieval_ratio": None,
+        "kv_cache_retrieval_seconds": None,
         "vision_tiles": None,
         "vision_selected_tiles": None,
         "input_images": None,
@@ -639,6 +699,9 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "attention_backend": args.attention_backend,
         "rms_norm_backend": args.rms_norm_backend,
         "kv_cache_compression": args.kv_cache_compression,
+        "kv_cache_retrieval": args.kv_cache_retrieval,
+        "kv_retrieval_topk_images": args.kv_retrieval_topk_images,
+        "kv_retrieval_keep_overview": args.kv_retrieval_keep_overview,
         "vision_tile_size": args.vision_tile_size,
         "vision_topk_tiles": args.vision_topk_tiles,
         "vision_token_keep_ratio": args.vision_token_keep_ratio,
@@ -675,6 +738,7 @@ def main() -> None:
         from d2f_vllm.lladao_gui_engine import (
             LLaDAOGuiD2FEngine,
             LLaDAOGuiKVCompressionConfig,
+            LLaDAOGuiKVRetrievalConfig,
         )
 
         rope_scaling = None
@@ -712,6 +776,11 @@ def main() -> None:
                 vision_score_layers=args.vision_score_layers,
                 vision_score_layer_mode=args.vision_score_layer_mode,
                 vision_score_pool_kernel=args.vision_score_pool_kernel,
+            ),
+            kv_retrieval=LLaDAOGuiKVRetrievalConfig(
+                enabled=args.kv_cache_retrieval,
+                topk_images=args.kv_retrieval_topk_images,
+                keep_overview=args.kv_retrieval_keep_overview,
             ),
         )
     else:

@@ -285,6 +285,44 @@ def test_generation_attention_mask_rejects_partial_blocks():
         build_generation_attention_mask(3, 6, 4, device=torch.device("cpu"))
 
 
+def test_retrieval_scoring_mask_is_causal_after_stored_context():
+    from d2f_vllm.lladao_gui_engine import (
+        build_causal_append_attention_mask,
+    )
+
+    mask = build_causal_append_attention_mask(
+        2,
+        3,
+        device=torch.device("cpu"),
+    )
+    assert mask.tolist() == [
+        [True, True, True, False, False],
+        [True, True, True, True, False],
+        [True, True, True, True, True],
+    ]
+
+
+def test_image_kv_retrieval_selects_whole_chunks_and_forced_overview():
+    from d2f_vllm.lladao_gui_engine import select_top_image_spans
+
+    selected = select_top_image_spans(
+        [0.2, 0.9, 0.9, float("-inf")],
+        [0, 1, 2],
+        1,
+        forced_indices=[3],
+    )
+    assert selected == [1, 3]
+
+
+def test_image_kv_retrieval_config_rejects_token_eviction_modes():
+    from d2f_vllm.lladao_gui_engine import LLaDAOGuiKVRetrievalConfig
+
+    with pytest.raises(ValueError, match="self_information"):
+        LLaDAOGuiKVRetrievalConfig(score_mode="per_head_eviction")
+    with pytest.raises(ValueError, match="non-negative"):
+        LLaDAOGuiKVRetrievalConfig(topk_images=-1)
+
+
 def test_vision_tiles_preserve_two_dimensional_regions():
     from d2f_vllm.lladao_gui_engine import build_vision_tiles
 

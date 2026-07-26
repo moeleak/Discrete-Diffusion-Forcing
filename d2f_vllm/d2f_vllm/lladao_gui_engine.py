@@ -59,6 +59,28 @@ class LLaDAOGuiKVCompressionConfig:
             raise ValueError("vision_score_pool_kernel must be a positive odd integer")
 
 
+@dataclass(frozen=True)
+class LLaDAOGuiKVRetrievalConfig:
+    """Select complete image KV chunks before decoding.
+
+    Retrieval is intentionally separate from token/head-level KV compression:
+    every token, layer, and KV head from a selected image span is retained.
+    """
+
+    enabled: bool = False
+    topk_images: int = 4
+    score_mode: str = "self_information"
+    keep_overview: bool = True
+
+    def __post_init__(self) -> None:
+        if self.topk_images < 0:
+            raise ValueError("topk_images must be non-negative")
+        if self.score_mode != "self_information":
+            raise ValueError(
+                "KV retrieval currently supports score_mode=self_information"
+            )
+
+
 @dataclass
 class LLaDAOGuiEngineOutput:
     text: str
@@ -70,6 +92,13 @@ class LLaDAOGuiEngineOutput:
     cached_prefix_tokens: int
     kv_cache_compression_ratio: float
     kv_cache_compression_seconds: float
+    kv_cache_retrieval_enabled: bool
+    kv_cache_retrieval_candidates: int
+    kv_cache_retrieval_selected: int
+    kv_cache_retrieval_indices: list[int]
+    kv_cache_retrieval_scores: dict[str, float]
+    kv_cache_retrieval_ratio: float
+    kv_cache_retrieval_seconds: float
     vision_tiles: int
     vision_selected_tiles: int
     input_images: int
@@ -158,6 +187,57 @@ def select_patch_tokens_per_head(
     return selected.sort(dim=1).values
 
 
+def select_top_image_spans(
+    scores: Sequence[float],
+    candidate_indices: Sequence[int],
+    topk_images: int,
+    *,
+    forced_indices: Sequence[int] = (),
+) -> list[int]:
+    """Select deterministic top-scoring image spans plus forced anchors."""
+
+    if topk_images < 0:
+        raise ValueError("topk_images must be non-negative")
+    score_values = [float(value) for value in scores]
+    candidates = [int(index) for index in candidate_indices]
+    forced = [int(index) for index in forced_indices]
+    all_indices = candidates + forced
+    if len(set(all_indices)) != len(all_indices):
+        raise ValueError("candidate and forced image indices must be unique")
+    if any(index < 0 or index >= len(score_values) for index in all_indices):
+        raise ValueError("image index is outside the score vector")
+    ranked = sorted(
+        candidates,
+        key=lambda index: (-score_values[index], index),
+    )
+    keep = len(ranked) if topk_images == 0 else min(topk_images, len(ranked))
+    return sorted(forced + ranked[:keep])
+
+
+def build_causal_append_attention_mask(
+    context_len: int,
+    active_len: int,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    """Let a scoring query attend stored context and its causal query prefix."""
+
+    if context_len < 0 or active_len <= 0:
+        raise ValueError("context_len must be non-negative and active_len positive")
+    mask = torch.zeros(
+        (active_len, context_len + active_len),
+        dtype=torch.bool,
+        device=device,
+    )
+    mask[:, :context_len] = True
+    mask[:, context_len:] = torch.ones(
+        (active_len, active_len),
+        dtype=torch.bool,
+        device=device,
+    ).tril()
+    return mask
+
+
 def build_generation_attention_mask(
     context_len: int,
     active_len: int,
@@ -195,6 +275,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         gpu_memory_utilization: float = 0.75,
         master_port: int = 2333,
         kv_compression: LLaDAOGuiKVCompressionConfig | None = None,
+        kv_retrieval: LLaDAOGuiKVRetrievalConfig | None = None,
         kv_cache_capacity: int | None = None,
         rope_scaling: dict | None = None,
         allow_unscaled_max_model_len: bool = False,
@@ -210,6 +291,16 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             if kv_compression is not None
             else LLaDAOGuiKVCompressionConfig()
         )
+        self.kv_retrieval = (
+            kv_retrieval
+            if kv_retrieval is not None
+            else LLaDAOGuiKVRetrievalConfig()
+        )
+        if self.kv_retrieval.enabled and self.kv_compression.enabled:
+            raise ValueError(
+                "KV-cache retrieval and KV-cache compression are mutually "
+                "exclusive; retrieval keeps every KV token in selected images"
+            )
         self.kv_cache_capacity = int(kv_cache_capacity or max_model_len)
         if self.kv_cache_capacity <= 0:
             raise ValueError("kv_cache_capacity must be positive")
@@ -558,6 +649,124 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             need_kv_cache_store=False,
         )
 
+    def _set_causal_append_context(
+        self,
+        *,
+        context_len: int,
+        active_len: int,
+        start_token: int,
+        page_ids: list[int],
+        need_kv_cache_store: bool,
+    ) -> None:
+        device = torch.device("cuda", torch.cuda.current_device())
+        slot_mapping = self._range_slot_mapping(
+            page_ids, start_token, active_len
+        )
+        block_tables = torch.tensor(
+            page_ids, dtype=torch.int32, device=device
+        ).view(1, -1)
+        mask = build_causal_append_attention_mask(
+            context_len,
+            active_len,
+            device=device,
+        )
+        seq = _StaticMaskSeq(mask, self.block_length)
+        set_context_diffusion_lm(
+            False,
+            cu_seqlens_q=torch.tensor(
+                [0, active_len], dtype=torch.int32, device=device
+            ),
+            cu_seqlens_k=torch.tensor(
+                [0, context_len + active_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            max_seqlen_q=active_len,
+            max_seqlen_k=context_len + active_len,
+            slot_mapping=slot_mapping,
+            context_lens=torch.tensor(
+                [context_len], dtype=torch.int32, device=device
+            ),
+            block_tables=block_tables,
+            seqs=[seq],
+            seq_lens=[active_len],
+            seq_lens_ts=torch.tensor(
+                [active_len], dtype=torch.int32, device=device
+            ),
+            kv_cache_layout="unified",
+            need_kv_cache_store=need_kv_cache_store,
+            full_attention=False,
+        )
+
+    def _forward_append_tokens_causal_paged(
+        self,
+        ids: Sequence[int],
+        positions: Sequence[int],
+        *,
+        context_len: int,
+        page_ids: list[int],
+        start_token: int,
+        need_kv_cache_store: bool = False,
+    ) -> torch.Tensor:
+        if len(ids) != len(positions):
+            raise ValueError(
+                f"ids/positions length mismatch: {len(ids)} vs {len(positions)}"
+            )
+        if not ids:
+            return torch.empty(
+                0,
+                int(self.config.hf_config.vocab_size),
+                device=torch.cuda.current_device(),
+            )
+        self._set_causal_append_context(
+            context_len=context_len,
+            active_len=len(ids),
+            start_token=start_token,
+            page_ids=page_ids,
+            need_kv_cache_store=need_kv_cache_store,
+        )
+        try:
+            hidden = self.model(
+                self._ids_tensor(ids),
+                self._positions_tensor(positions),
+            )
+            return self.model.compute_logits(hidden)
+        finally:
+            reset_context_diffusion_lm()
+
+    def _forward_image_spans(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        page_ids: list[int],
+        span_indices: Sequence[int],
+    ) -> int:
+        """Prefill complete image spans into contiguous cache slots."""
+
+        cache_cursor = 0
+        for raw_index in span_indices:
+            span_index = int(raw_index)
+            if span_index < 0 or span_index >= len(prefix.image_spans):
+                raise ValueError(f"image span index out of range: {span_index}")
+            span = prefix.image_spans[span_index]
+            start, end = span.token_start, span.token_end
+            embeddings = prefix.image_embeddings[start:end]
+            positions = prefix.image_positions[start:end]
+            span_len = end - start
+            slot_mapping = self._range_slot_mapping(
+                page_ids, cache_cursor, span_len
+            )
+            self._set_full_prefill_context(span_len, slot_mapping)
+            try:
+                self.model(
+                    None,
+                    self._positions_tensor(positions),
+                    input_embeds=embeddings,
+                )
+            finally:
+                reset_context_diffusion_lm()
+            cache_cursor += span_len
+        return cache_cursor
+
     def _forward_image_prefix(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -567,22 +776,99 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         # bidirectional prefill per tile preserves that native multi-image
         # boundary and avoids quadratic attention across unrelated tiles.
         # The subsequent text prompt attends all stored tile KV in one request.
-        for span in prefix.image_spans:
-            start, end = span.token_start, span.token_end
-            embeddings = prefix.image_embeddings[start:end]
-            positions = prefix.image_positions[start:end]
-            slot_mapping = self._range_slot_mapping(
-                page_ids, start, end - start
+        cached = self._forward_image_spans(
+            prefix,
+            page_ids,
+            range(len(prefix.image_spans)),
+        )
+        if cached != len(prefix.image_ids):
+            raise RuntimeError(
+                f"image prefill length mismatch: got {cached}, "
+                f"expected {len(prefix.image_ids)}"
             )
-            self._set_full_prefill_context(end - start, slot_mapping)
-            try:
-                self.model(
-                    None,
-                    self._positions_tensor(positions),
-                    input_embeds=embeddings,
-                )
-            finally:
-                reset_context_diffusion_lm()
+
+    def _score_image_span_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_index: int,
+    ) -> float:
+        """Score one complete visual KV chunk by causal prompt likelihood."""
+
+        span = prefix.image_spans[span_index]
+        span_len = span.token_end - span.token_start
+        scoring_len = span_len + len(prefix.prompt_ids)
+        if scoring_len > self.kv_cache_capacity:
+            raise ValueError(
+                f"retrieval scoring length {scoring_len} exceeds "
+                f"kv_cache_capacity={self.kv_cache_capacity}"
+            )
+        page_ids = self._prefix_cache.allocate_pages(
+            math.ceil(scoring_len / self.page_size)
+        )
+        try:
+            cached = self._forward_image_spans(
+                prefix,
+                page_ids,
+                [span_index],
+            )
+            logits = self._forward_append_tokens_causal_paged(
+                prefix.prompt_ids,
+                prefix.prompt_positions,
+                context_len=cached,
+                page_ids=page_ids,
+                start_token=cached,
+                need_kv_cache_store=False,
+            )
+            if len(prefix.prompt_ids) < 2:
+                return float("-inf")
+            labels = self._ids_tensor(prefix.prompt_ids[1:])
+            token_nll = F.cross_entropy(
+                logits[:-1].float(),
+                labels,
+                reduction="none",
+            )
+            score = float(-token_nll.mean().item())
+            return score if math.isfinite(score) else float("-inf")
+        finally:
+            self._prefix_cache.release_pages(page_ids)
+
+    def _select_retrieved_image_spans(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        *,
+        has_overview: bool,
+    ) -> tuple[list[int], dict[int, float], int]:
+        """Apply reference-style single-chunk self-information retrieval."""
+
+        span_count = len(prefix.image_spans)
+        overview_index = span_count - 1 if has_overview else None
+        candidates = [
+            index
+            for index in range(span_count)
+            if index != overview_index
+        ]
+        forced = (
+            [overview_index]
+            if overview_index is not None and self.kv_retrieval.keep_overview
+            else []
+        )
+        scores = [float("-inf")] * span_count
+        for index in candidates:
+            scores[index] = self._score_image_span_self_information(
+                prefix,
+                index,
+            )
+        selected = select_top_image_spans(
+            scores,
+            candidates,
+            self.kv_retrieval.topk_images,
+            forced_indices=forced,
+        )
+        return (
+            selected,
+            {index: scores[index] for index in candidates},
+            len(candidates),
+        )
 
     def _forward_active(
         self,
@@ -733,17 +1019,14 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             raise ValueError(
                 "full-page overview and truncation are mutually exclusive"
             )
+        if self.kv_retrieval.enabled and not full_page:
+            raise ValueError("KV-cache image retrieval requires full_page=True")
         torch.cuda.synchronize()
-        full_length = prefix.length + max_new_tokens
-        if full_length > self.config.max_model_len:
+        dense_full_length = prefix.length + max_new_tokens
+        if dense_full_length > self.config.max_model_len:
             raise ValueError(
-                f"image+prompt+generation length {full_length} exceeds "
+                f"image+prompt+generation length {dense_full_length} exceeds "
                 f"max_model_len={self.config.max_model_len}"
-            )
-        if full_length > self.kv_cache_capacity:
-            raise ValueError(
-                f"image+prompt+generation length {full_length} exceeds "
-                f"kv_cache_capacity={self.kv_cache_capacity}"
             )
         max_prefill_position = max(
             max(prefix.image_positions),
@@ -756,19 +1039,61 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 f"generation RoPE position {max_generation_position} exceeds "
                 f"max_model_len={self.config.max_model_len}"
             )
-        pages_needed = math.ceil(full_length / self.page_size)
+        retrieval_started = time.perf_counter()
+        retrieved_indices = list(range(len(prefix.image_spans)))
+        retrieval_scores: dict[int, float] = {}
+        retrieval_candidates = len(prefix.image_spans)
+        if self.kv_retrieval.enabled:
+            (
+                retrieved_indices,
+                retrieval_scores,
+                retrieval_candidates,
+            ) = self._select_retrieved_image_spans(
+                prefix,
+                has_overview=full_page_overview,
+            )
+        torch.cuda.synchronize()
+        retrieval_finished = time.perf_counter()
+        retrieval_seconds = (
+            retrieval_finished - retrieval_started
+            if self.kv_retrieval.enabled
+            else 0.0
+        )
+        retrieved_image_tokens = sum(
+            prefix.image_spans[index].token_end
+            - prefix.image_spans[index].token_start
+            for index in retrieved_indices
+        )
+        retrieved_prefix_len = retrieved_image_tokens + len(prefix.prompt_ids)
+        active_full_length = retrieved_prefix_len + max_new_tokens
+        if active_full_length > self.kv_cache_capacity:
+            raise ValueError(
+                f"retrieved image+prompt+generation length "
+                f"{active_full_length} exceeds "
+                f"kv_cache_capacity={self.kv_cache_capacity}"
+            )
+        pages_needed = math.ceil(active_full_length / self.page_size)
         page_ids = self._prefix_cache.allocate_pages(pages_needed)
         try:
-            self._forward_image_prefix(prefix, page_ids)
+            cached_image_tokens = self._forward_image_spans(
+                prefix,
+                page_ids,
+                retrieved_indices,
+            )
+            if cached_image_tokens != retrieved_image_tokens:
+                raise RuntimeError(
+                    f"retrieved image prefill length mismatch: got "
+                    f"{cached_image_tokens}, expected {retrieved_image_tokens}"
+                )
             torch.cuda.synchronize()
             image_cached = time.perf_counter()
             query_capture = {} if self._compression_reduces_context() else None
             self._forward_append_tokens_paged(
                 prefix.prompt_ids,
                 prefix.prompt_positions,
-                context_len=len(prefix.image_ids),
+                context_len=cached_image_tokens,
                 all_page_ids=page_ids,
-                start_token=len(prefix.image_ids),
+                start_token=cached_image_tokens,
                 query_capture=query_capture,
             )
             torch.cuda.synchronize()
@@ -785,7 +1110,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             ]
             compression_stats: dict[str, int | float] = {
                 "dense_prefix_tokens": prefix.length,
-                "cached_prefix_tokens": prefix.length,
+                "cached_prefix_tokens": retrieved_prefix_len,
                 "vision_patches": prefix.image_patch_count,
                 "vision_kept_patches": prefix.image_patch_count,
                 "vision_tiles": len(tiles),
@@ -793,7 +1118,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 "candidate_patches": prefix.image_patch_count,
                 "compression_ratio": 1.0,
             }
-            cached_prefix_len = prefix.length
+            cached_prefix_len = retrieved_prefix_len
             if query_capture is not None:
                 scores_by_layer = self._score_vision_tokens(
                     prefix,
@@ -826,7 +1151,11 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 query_capture.clear()
             torch.cuda.synchronize()
             prompt_cached = time.perf_counter()
-            compression_seconds = prompt_cached - dense_prompt_cached
+            compression_seconds = (
+                prompt_cached - dense_prompt_cached
+                if query_capture is not None
+                else 0.0
+            )
 
             device = torch.device("cuda", torch.cuda.current_device())
             tokens = torch.full(
@@ -1009,6 +1338,20 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                     compression_stats["compression_ratio"]
                 ),
                 kv_cache_compression_seconds=compression_seconds,
+                kv_cache_retrieval_enabled=self.kv_retrieval.enabled,
+                kv_cache_retrieval_candidates=retrieval_candidates,
+                kv_cache_retrieval_selected=len(retrieved_indices),
+                kv_cache_retrieval_indices=[
+                    int(index) for index in retrieved_indices
+                ],
+                kv_cache_retrieval_scores={
+                    str(index): float(score)
+                    for index, score in retrieval_scores.items()
+                },
+                kv_cache_retrieval_ratio=(
+                    retrieved_prefix_len / prefix.length
+                ),
+                kv_cache_retrieval_seconds=retrieval_seconds,
                 vision_tiles=int(compression_stats["vision_tiles"]),
                 vision_selected_tiles=int(
                     compression_stats["vision_selected_tiles"]
