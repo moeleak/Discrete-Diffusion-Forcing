@@ -187,6 +187,7 @@ def main() -> None:
                 full_page_position_mode=args.full_page_position_mode,
                 full_page_overview=args.full_page_overview,
                 truncate_full_page_tiles=args.truncate_full_page_tiles,
+                retrieval_query=args.prompt,
             ).to_dict()
     finally:
         engine.close()

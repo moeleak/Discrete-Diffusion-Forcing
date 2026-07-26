@@ -97,6 +97,8 @@ class LLaDAOGuiEngineOutput:
     kv_cache_retrieval_selected: int
     kv_cache_retrieval_indices: list[int]
     kv_cache_retrieval_scores: dict[str, float]
+    kv_cache_retrieval_query: str | None
+    kv_cache_retrieval_query_tokens: int
     kv_cache_retrieval_ratio: float
     kv_cache_retrieval_seconds: float
     vision_tiles: int
@@ -791,12 +793,14 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         self,
         prefix: LLaDAOGuiPrefix,
         span_index: int,
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
     ) -> float:
-        """Score one complete visual KV chunk by causal prompt likelihood."""
+        """Score one complete visual KV chunk by causal query likelihood."""
 
         span = prefix.image_spans[span_index]
         span_len = span.token_end - span.token_start
-        scoring_len = span_len + len(prefix.prompt_ids)
+        scoring_len = span_len + len(query_ids)
         if scoring_len > self.kv_cache_capacity:
             raise ValueError(
                 f"retrieval scoring length {scoring_len} exceeds "
@@ -812,16 +816,16 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 [span_index],
             )
             logits = self._forward_append_tokens_causal_paged(
-                prefix.prompt_ids,
-                prefix.prompt_positions,
+                query_ids,
+                query_positions,
                 context_len=cached,
                 page_ids=page_ids,
                 start_token=cached,
                 need_kv_cache_store=False,
             )
-            if len(prefix.prompt_ids) < 2:
+            if len(query_ids) < 2:
                 return float("-inf")
-            labels = self._ids_tensor(prefix.prompt_ids[1:])
+            labels = self._ids_tensor(query_ids[1:])
             token_nll = F.cross_entropy(
                 logits[:-1].float(),
                 labels,
@@ -837,6 +841,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         prefix: LLaDAOGuiPrefix,
         *,
         has_overview: bool,
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
     ) -> tuple[list[int], dict[int, float], int]:
         """Apply reference-style single-chunk self-information retrieval."""
 
@@ -857,6 +863,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             scores[index] = self._score_image_span_self_information(
                 prefix,
                 index,
+                query_ids,
+                query_positions,
             )
         selected = select_top_image_spans(
             scores,
@@ -982,6 +990,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         full_page_position_mode: str = "native",
         full_page_overview: bool = False,
         truncate_full_page_tiles: bool = False,
+        retrieval_query: str | None = None,
     ) -> LLaDAOGuiEngineOutput:
         total_started = time.perf_counter()
         torch.cuda.reset_peak_memory_stats()
@@ -1043,7 +1052,33 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         retrieved_indices = list(range(len(prefix.image_spans)))
         retrieval_scores: dict[int, float] = {}
         retrieval_candidates = len(prefix.image_spans)
+        retrieval_query_text: str | None = None
+        retrieval_query_ids: list[int] = []
         if self.kv_retrieval.enabled:
+            retrieval_query_text = (
+                prompt if retrieval_query is None else retrieval_query
+            ).strip()
+            if not retrieval_query_text:
+                raise ValueError("KV-cache retrieval query cannot be empty")
+            retrieval_query_ids = [
+                self.prefix_encoder.bos_token_id,
+                *self.tokenizer.encode(
+                    retrieval_query_text,
+                    add_special_tokens=False,
+                ),
+                self.prefix_encoder.eos_token_id,
+            ]
+            retrieval_query_positions = list(
+                range(
+                    prefix.prompt_positions[0],
+                    prefix.prompt_positions[0] + len(retrieval_query_ids),
+                )
+            )
+            if retrieval_query_positions[-1] >= self.config.max_model_len:
+                raise ValueError(
+                    "KV-cache retrieval query position exceeds "
+                    f"max_model_len={self.config.max_model_len}"
+                )
             (
                 retrieved_indices,
                 retrieval_scores,
@@ -1051,6 +1086,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             ) = self._select_retrieved_image_spans(
                 prefix,
                 has_overview=full_page_overview,
+                query_ids=retrieval_query_ids,
+                query_positions=retrieval_query_positions,
             )
         torch.cuda.synchronize()
         retrieval_finished = time.perf_counter()
@@ -1348,6 +1385,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                     str(index): float(score)
                     for index, score in retrieval_scores.items()
                 },
+                kv_cache_retrieval_query=retrieval_query_text,
+                kv_cache_retrieval_query_tokens=len(retrieval_query_ids),
                 kv_cache_retrieval_ratio=(
                     retrieved_prefix_len / prefix.length
                 ),

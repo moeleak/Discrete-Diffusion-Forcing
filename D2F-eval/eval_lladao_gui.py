@@ -401,6 +401,7 @@ def model_generate(
     args: argparse.Namespace,
     *,
     full_page: bool = False,
+    retrieval_query: str | None = None,
 ) -> dict[str, Any]:
     if args.backend == "baseline":
         return engine.generate_baseline(
@@ -432,6 +433,7 @@ def model_generate(
         full_page_position_mode=args.full_page_position_mode,
         full_page_overview=args.full_page_overview,
         truncate_full_page_tiles=args.truncate_full_page_tiles,
+        retrieval_query=retrieval_query,
     )
     return {
         "raw_text": output.text,
@@ -451,6 +453,10 @@ def model_generate(
         "kv_cache_retrieval_selected": output.kv_cache_retrieval_selected,
         "kv_cache_retrieval_indices": output.kv_cache_retrieval_indices,
         "kv_cache_retrieval_scores": output.kv_cache_retrieval_scores,
+        "kv_cache_retrieval_query": output.kv_cache_retrieval_query,
+        "kv_cache_retrieval_query_tokens": (
+            output.kv_cache_retrieval_query_tokens
+        ),
         "kv_cache_retrieval_ratio": output.kv_cache_retrieval_ratio,
         "kv_cache_retrieval_seconds": output.kv_cache_retrieval_seconds,
         "vision_tiles": output.vision_tiles,
@@ -488,6 +494,11 @@ def infer_one(
         runtime_input_protocol = "full_page_tiles_with_overview"
     elif full_page and args.truncate_full_page_tiles:
         runtime_input_protocol = "full_page_tiles_truncated"
+    retrieval_query = (
+        native_resize_prompt(sample)
+        if args.backend == "d2f_vllm" and args.kv_cache_retrieval
+        else None
+    )
     if args.backend == "d2f_vllm" and full_page:
         sequence = sample.get("sequence_tokens")
         expected_total = (
@@ -515,6 +526,7 @@ def infer_one(
             prompt,
             args,
             full_page=full_page,
+            retrieval_query=retrieval_query,
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -561,6 +573,12 @@ def infer_one(
         ),
         "kv_cache_retrieval_scores": result.get(
             "kv_cache_retrieval_scores"
+        ),
+        "kv_cache_retrieval_query": result.get(
+            "kv_cache_retrieval_query"
+        ),
+        "kv_cache_retrieval_query_tokens": result.get(
+            "kv_cache_retrieval_query_tokens"
         ),
         "kv_cache_retrieval_ratio": result.get(
             "kv_cache_retrieval_ratio"
@@ -630,6 +648,8 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "kv_cache_retrieval_selected": None,
         "kv_cache_retrieval_indices": None,
         "kv_cache_retrieval_scores": None,
+        "kv_cache_retrieval_query": None,
+        "kv_cache_retrieval_query_tokens": None,
         "kv_cache_retrieval_ratio": None,
         "kv_cache_retrieval_seconds": None,
         "vision_tiles": None,
@@ -702,6 +722,7 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "kv_cache_retrieval": args.kv_cache_retrieval,
         "kv_retrieval_topk_images": args.kv_retrieval_topk_images,
         "kv_retrieval_keep_overview": args.kv_retrieval_keep_overview,
+        "kv_retrieval_query_source": "native_resize_prompt",
         "vision_tile_size": args.vision_tile_size,
         "vision_topk_tiles": args.vision_topk_tiles,
         "vision_token_keep_ratio": args.vision_token_keep_ratio,

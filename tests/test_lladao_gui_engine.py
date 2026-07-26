@@ -256,6 +256,38 @@ def test_overview_grounding_prompt_names_tiles_and_global_anchor():
     assert "Click on Submit." in prompt
 
 
+def test_retrieval_query_strips_full_page_transport_wrapper():
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "D2F-eval"
+        / "eval_lladao_gui.py"
+    )
+    spec = importlib.util.spec_from_file_location("eval_lladao_gui", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    sample = {
+        "prompt": (
+            "The following 12 images are non-overlapping tiles from one "
+            "1318x5283 webpage screenshot, ordered left-to-right and then "
+            "top-to-bottom. Treat them as one complete page. "
+            "Click on Quick Tools. Return the action and bounding box with "
+            "coordinates normalized to the complete original screenshot in "
+            "[0,1000]."
+        ),
+        "tile_layout": [{}] * 12,
+        "image_width": 1_318,
+        "image_height": 5_283,
+    }
+    assert module.native_resize_prompt(sample) == "Click on Quick Tools."
+    overview = module.overview_grounding_prompt(sample)
+    assert overview.count("Click on Quick Tools.") == 1
+    assert overview.count("Return the action and bounding box") == 1
+
+
 def test_multimodal_positions_reject_unknown_mode():
     from d2f_vllm.multimodal.lladao_gui import (
         build_multimodal_position_ids,
