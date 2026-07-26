@@ -389,19 +389,23 @@ LIMIT=100 GPU=0 KV_RETRIEVAL_TOPK_IMAGES=4 \
   bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh
 ```
 
-The runtime ranks each original full-resolution image tile by causal prompt
+The runtime extracts only the public operation instruction from the prepared
+prompt, ranks each original full-resolution image tile by its causal
 self-information, keeps all KV tokens from the top four tiles, and always
-keeps the whole-page overview as the coordinate anchor. It records retrieval
-indices, scores, latency, and resident/dense prefix ratio separately from KV
-compression; `kv_cache_compression_ratio` remains 1.0.
+keeps the whole-page overview as the coordinate anchor. It records the exact
+retrieval query, indices, scores, latency, and resident/dense prefix ratio
+separately from KV compression; `kv_cache_compression_ratio` remains 1.0.
 
 On the identical first 100 long-page samples, whole-image Top-4 retrieval plus
 the forced overview scored 0% raw SSR and 71% SSR after prompt-only OCR, with
 71% joint SSR, 100% action F1, and a 93% parse rate. The average resident
-prefix fell from 33,483 to 11,253 tokens, a 66.39% token-weighted reduction,
-while the maximum generation position remained 63,120. The no-retrieval
-uncropped YaRN row scored 75% after OCR, so this Top-4 policy trades four SSR
-points for the smaller decode-time KV working set.
+prefix fell from 33,483 to 13,399 tokens, a 59.98% token-weighted reduction,
+while the maximum generation position remained 63,120. Post-hoc evaluation
+found that the selected Top-4 contained the target tile in 63/100 samples,
+versus 36/100 for the earlier whole-prompt query. Ground-truth boxes are used
+only for this audit, never for retrieval. The no-retrieval uncropped YaRN row
+scored 75% after OCR, so this Top-4 policy trades four SSR points for the
+smaller decode-time KV working set.
 
 For unscaled 128K extrapolation without YaRN, overview, crop, truncation, or
 KV compression, run:
