@@ -316,6 +316,23 @@ full-page prefix. It is not the compression ratio. A valid run must report
 forced overview, `kv_cache_compression_ratio=1.0`, and
 `kv_cache_compression_seconds=0.0`.
 
+The validated run on revision `5297aee` used the same ordered 100 sample IDs,
+dense prefix lengths, input-image counts, and generation positions as the
+uncropped no-retrieval YaRN run. It completed without inference errors:
+
+| Configuration | Raw SSR | Final SSR | Joint SSR | Action F1 | Parse | Mean resident / dense prefix | Max RoPE | Mean model latency |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| YaRN 128K + OCR, all original tiles + overview | 7% | 75% | 75% | 100% | 100% | 33,483 / 33,483 (100%) | 63,120 | 13.36 s |
+| YaRN 128K + OCR, image Top-4 KV retrieval + overview | 0% | 71% | 71% | 100% | 93% | 11,253 / 33,483 (33.61%) | 63,120 | 5.50 s |
+
+The second row therefore reduces the token-weighted resident visual/prompt KV
+working set by 66.39%, while losing four final SSR points. Its 5.50-second
+number covers model preprocessing, retrieval, cache construction, and
+generation; as in the existing scorer, it does not include the subsequent OCR
+fusion stage. Across all 100 records, exactly four source tiles plus one
+overview were retained, compression ratio stayed at 1.0, compression time
+stayed at zero, and mean retrieval scoring time was 3.52 seconds.
+
 ### Five-way comparison on 100 native-16K full-page samples
 
 The long-page results above use a set selected specifically above 16K. For a

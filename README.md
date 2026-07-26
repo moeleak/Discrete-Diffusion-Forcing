@@ -395,6 +395,14 @@ keeps the whole-page overview as the coordinate anchor. It records retrieval
 indices, scores, latency, and resident/dense prefix ratio separately from KV
 compression; `kv_cache_compression_ratio` remains 1.0.
 
+On the identical first 100 long-page samples, whole-image Top-4 retrieval plus
+the forced overview scored 0% raw SSR and 71% SSR after prompt-only OCR, with
+71% joint SSR, 100% action F1, and a 93% parse rate. The average resident
+prefix fell from 33,483 to 11,253 tokens, a 66.39% token-weighted reduction,
+while the maximum generation position remained 63,120. The no-retrieval
+uncropped YaRN row scored 75% after OCR, so this Top-4 policy trades four SSR
+points for the smaller decode-time KV working set.
+
 For unscaled 128K extrapolation without YaRN, overview, crop, truncation, or
 KV compression, run:
 
