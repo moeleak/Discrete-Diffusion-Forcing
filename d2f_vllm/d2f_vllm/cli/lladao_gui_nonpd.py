@@ -94,6 +94,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
     parser.add_argument(
+        "--kv-retrieval-mask-rounds",
+        type=int,
+        default=2,
+        help=(
+            "number of complementary masked-query rounds used by "
+            "bidirectional dLLM retrieval scoring"
+        ),
+    )
+    parser.add_argument(
         "--kv-retrieval-keep-overview",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -119,6 +128,8 @@ def main() -> None:
             "--kv-cache-retrieval and --kv-cache-compression are mutually "
             "exclusive"
         )
+    if args.kv_retrieval_mask_rounds <= 0:
+        raise SystemExit("--kv-retrieval-mask-rounds must be positive")
     if (
         args.max_model_len > args.original_max_position_embeddings
         and args.rope_scaling == "none"
@@ -173,6 +184,7 @@ def main() -> None:
         kv_retrieval=LLaDAOGuiKVRetrievalConfig(
             enabled=args.kv_cache_retrieval,
             topk_images=args.kv_retrieval_topk_images,
+            mask_rounds=args.kv_retrieval_mask_rounds,
             keep_overview=args.kv_retrieval_keep_overview,
         ),
     )

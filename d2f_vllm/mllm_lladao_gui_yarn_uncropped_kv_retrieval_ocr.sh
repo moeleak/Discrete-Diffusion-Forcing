@@ -8,13 +8,14 @@ LIMIT="${LIMIT:-100}"
 GPU="${GPU:-0}"
 KV_CACHE_CAPACITY="${KV_CACHE_CAPACITY:-65536}"
 KV_RETRIEVAL_TOPK_IMAGES="${KV_RETRIEVAL_TOPK_IMAGES:-4}"
+KV_RETRIEVAL_MASK_ROUNDS="${KV_RETRIEVAL_MASK_ROUNDS:-2}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 REVISION="${REVISION:-$(git -C "$REPO" rev-parse --short HEAD)}"
-RESULT_ROOT="${RESULT_ROOT:-$ROOT/results/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}}"
+RESULT_ROOT="${RESULT_ROOT:-$ROOT/results/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}}"
 MODEL_OUTPUT="${MODEL_OUTPUT:-$RESULT_ROOT/model}"
 FUSED_OUTPUT="${FUSED_OUTPUT:-$RESULT_ROOT/fused}"
-MODEL_LOG="${MODEL_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-model-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
-OCR_LOG="${OCR_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
+MODEL_LOG="${MODEL_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-model-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
+OCR_LOG="${OCR_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
 
 if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || (( LIMIT > 100 )); then
   echo "uncropped YaRN KV-retrieval OCR LIMIT must be in [1, 100]" >&2
@@ -22,6 +23,10 @@ if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || (( LIMIT > 100 )); then
 fi
 if ! [[ "$KV_RETRIEVAL_TOPK_IMAGES" =~ ^[0-9]+$ ]]; then
   echo "KV_RETRIEVAL_TOPK_IMAGES must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$KV_RETRIEVAL_MASK_ROUNDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "KV_RETRIEVAL_MASK_ROUNDS must be a positive integer" >&2
   exit 2
 fi
 
@@ -35,6 +40,7 @@ FULL_PAGE_TRUNCATION=0 \
 KV_CACHE_COMPRESSION=0 \
 KV_CACHE_RETRIEVAL=1 \
 KV_RETRIEVAL_TOPK_IMAGES="$KV_RETRIEVAL_TOPK_IMAGES" \
+KV_RETRIEVAL_MASK_ROUNDS="$KV_RETRIEVAL_MASK_ROUNDS" \
 KV_RETRIEVAL_KEEP_OVERVIEW=1 \
 MAX_MODEL_LEN=131072 \
 KV_CACHE_CAPACITY="$KV_CACHE_CAPACITY" \

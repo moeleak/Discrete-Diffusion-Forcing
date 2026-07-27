@@ -131,7 +131,9 @@ BENCHMARKS = {
     ),
     "yarn128k-kv-top4-ocr": BenchmarkSpec(
         name="yarn128k-kv-top4-ocr",
-        description="YaRN 128K with instruction-query Top-4 image KV retrieval",
+        description=(
+            "YaRN 128K with bidirectional masked-query Top-4 image KV retrieval"
+        ),
         launcher=("d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh"),
         dataset="long100",
         output_variable="RESULT_ROOT",
@@ -140,6 +142,7 @@ BENCHMARKS = {
         environment=pairs(
             KV_CACHE_CAPACITY="65536",
             KV_RETRIEVAL_TOPK_IMAGES="4",
+            KV_RETRIEVAL_MASK_ROUNDS="2",
         ),
         input_processing="Top-4 exact 980px tiles + forced overview",
         rope="YaRN factor 8",
@@ -149,8 +152,11 @@ BENCHMARKS = {
         overview="yes (force-kept)",
         truncation="whole-image retrieval",
         ocr="prompt-only retrieval fusion",
-        kv_policy="whole-image Top-4 retrieval; compression off",
-        retrieval_query="visible operation instruction only",
+        kv_policy=(
+            "whole-image Top-4 retrieval; bidirectional masked scoring; "
+            "compression off"
+        ),
+        retrieval_query="operation instruction; complementary mask rounds=2",
         full_page_tile_size=980,
     ),
     "unscaled128k-ocr": BenchmarkSpec(

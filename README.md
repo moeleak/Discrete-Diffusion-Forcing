@@ -390,22 +390,22 @@ LIMIT=100 GPU=0 KV_RETRIEVAL_TOPK_IMAGES=4 \
 ```
 
 The runtime extracts only the public operation instruction from the prepared
-prompt, ranks each original full-resolution image tile by its causal
-self-information, keeps all KV tokens from the top four tiles, and always
-keeps the whole-page overview as the coordinate anchor. It records the exact
-retrieval query, indices, scores, latency, and resident/dense prefix ratio
-separately from KV compression; `kv_cache_compression_ratio` remains 1.0.
+prompt, creates two complementary masked versions, and ranks each original
+full-resolution image tile by native dLLM bidirectional masked
+self-information. Every non-boundary query token is scored once at its
+original masked position; the candidate image and corrupted query share one
+full-attention document, so no next-token shift or visible-target leakage is
+used. The runtime keeps all KV tokens from the top four tiles and always keeps
+the whole-page overview as the coordinate anchor. It records the exact
+retrieval query, score mode, mask rounds, indices, scores, latency, and
+resident/dense prefix ratio separately from KV compression;
+`kv_cache_compression_ratio` remains 1.0.
 
-On the identical first 100 long-page samples, whole-image Top-4 retrieval plus
-the forced overview scored 0% raw SSR and 71% SSR after prompt-only OCR, with
-71% joint SSR, 100% action F1, and a 93% parse rate. The average resident
-prefix fell from 33,483 to 13,399 tokens, a 59.98% token-weighted reduction,
-while the maximum generation position remained 63,120. Post-hoc evaluation
-found that the selected Top-4 contained the target tile in 63/100 samples,
-versus 36/100 for the earlier whole-prompt query. Ground-truth boxes are used
-only for this audit, never for retrieval. The no-retrieval uncropped YaRN row
-scored 75% after OCR, so this Top-4 policy trades four SSR points for the
-smaller decode-time KV working set.
+The previously recorded first-100 Top-4 result—0% raw SSR, 71% OCR SSR and
+63/100 target-tile recall—used the retired causal scorer on revision
+`b877dda`. It remains a historical baseline and is not evidence for the
+current bidirectional masked scorer. Ground-truth boxes are used only for
+post-hoc audit, never for retrieval.
 
 For unscaled 128K extrapolation without YaRN, overview, crop, truncation, or
 KV compression, run:

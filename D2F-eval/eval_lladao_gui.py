@@ -152,6 +152,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
     parser.add_argument(
+        "--kv-retrieval-mask-rounds",
+        type=int,
+        default=2,
+        help=(
+            "number of complementary masked-query rounds used by "
+            "bidirectional dLLM retrieval scoring"
+        ),
+    )
+    parser.add_argument(
         "--kv-retrieval-keep-overview",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -214,6 +223,8 @@ def parse_args() -> argparse.Namespace:
         )
     if args.kv_retrieval_topk_images < 0:
         parser.error("--kv-retrieval-topk-images must be non-negative")
+    if args.kv_retrieval_mask_rounds <= 0:
+        parser.error("--kv-retrieval-mask-rounds must be positive")
     for name in (
         "block_add_threshold",
         "decoded_token_threshold",
@@ -499,6 +510,12 @@ def model_generate(
         "kv_cache_retrieval_query_tokens": (
             output.kv_cache_retrieval_query_tokens
         ),
+        "kv_cache_retrieval_score_mode": (
+            output.kv_cache_retrieval_score_mode
+        ),
+        "kv_cache_retrieval_mask_rounds": (
+            output.kv_cache_retrieval_mask_rounds
+        ),
         "kv_cache_retrieval_ratio": output.kv_cache_retrieval_ratio,
         "kv_cache_retrieval_seconds": output.kv_cache_retrieval_seconds,
         "vision_tiles": output.vision_tiles,
@@ -624,6 +641,12 @@ def infer_one(
         "kv_cache_retrieval_query_tokens": result.get(
             "kv_cache_retrieval_query_tokens"
         ),
+        "kv_cache_retrieval_score_mode": result.get(
+            "kv_cache_retrieval_score_mode"
+        ),
+        "kv_cache_retrieval_mask_rounds": result.get(
+            "kv_cache_retrieval_mask_rounds"
+        ),
         "kv_cache_retrieval_ratio": result.get(
             "kv_cache_retrieval_ratio"
         ),
@@ -694,6 +717,8 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "kv_cache_retrieval_scores": None,
         "kv_cache_retrieval_query": None,
         "kv_cache_retrieval_query_tokens": None,
+        "kv_cache_retrieval_score_mode": None,
+        "kv_cache_retrieval_mask_rounds": None,
         "kv_cache_retrieval_ratio": None,
         "kv_cache_retrieval_seconds": None,
         "vision_tiles": None,
@@ -765,6 +790,8 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "kv_cache_compression": args.kv_cache_compression,
         "kv_cache_retrieval": args.kv_cache_retrieval,
         "kv_retrieval_topk_images": args.kv_retrieval_topk_images,
+        "kv_retrieval_score_mode": "masked_self_information",
+        "kv_retrieval_mask_rounds": args.kv_retrieval_mask_rounds,
         "kv_retrieval_keep_overview": args.kv_retrieval_keep_overview,
         "kv_retrieval_query_source": "native_resize_prompt",
         "vision_tile_size": args.vision_tile_size,
@@ -845,6 +872,7 @@ def main() -> None:
             kv_retrieval=LLaDAOGuiKVRetrievalConfig(
                 enabled=args.kv_cache_retrieval,
                 topk_images=args.kv_retrieval_topk_images,
+                mask_rounds=args.kv_retrieval_mask_rounds,
                 keep_overview=args.kv_retrieval_keep_overview,
             ),
         )

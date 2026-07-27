@@ -390,12 +390,29 @@ paper-comparable cropped Mind2Web results.
 
 The retrieval variant starts from the uncropped YaRN protocol above. It strips
 the deterministic full-page transport wrapper with `native_resize_prompt()`,
-then scores each exact source tile independently with the causal
-self-information of only the public operation instruction (for example,
-`Click on Quick Tools.`). It retains the top four complete image spans and
-force-keeps the resized whole-page overview. Selection never drops individual
-patch tokens, layers, or KV heads, so this mode is mutually exclusive with
+then scores each exact source tile independently with native dLLM masked
+self-information over only the public operation instruction (for example,
+`Click on Quick Tools.`). The default two complementary corruptions mask every
+non-boundary query token exactly once. Each candidate image and corrupted
+query are evaluated together with full bidirectional attention, and CE is
+read only from the original positions of the masked tokens. This avoids both
+next-token causal scoring and target leakage from a visible answer token. The
+runtime retains the top four complete image spans and force-keeps the resized
+whole-page overview. Selection never drops individual patch tokens, layers,
+or KV heads, so this mode is mutually exclusive with
 `KV_CACHE_COMPRESSION=1`.
+
+The model input and two-round scoring input are conceptually:
+
+```text
+generation: [image tiles] [overview] [BOS] wrapper + question + format [EOS]
+retrieval 1: [one candidate image] [BOS] [MASK] on [MASK] Tools [MASK] [EOS]
+retrieval 2: [one candidate image] [BOS] Click [MASK] Quick [MASK] . [EOS]
+```
+
+The exact subword masks depend on tokenization. BOS and EOS remain visible,
+all other query tokens are scored once, and no OCR text or target annotation
+is inserted into the retrieval query.
 
 ```bash
 cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
@@ -403,17 +420,18 @@ cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
 LIMIT=100 \
 GPU=0 \
 KV_RETRIEVAL_TOPK_IMAGES=4 \
-RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-kvretrieve4-ocr-n100 \
-MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-model.log \
-OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-ocr.log \
+KV_RETRIEVAL_MASK_ROUNDS=2 \
+RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-kvretrieve4-masked2-ocr-n100 \
+MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-model.log \
+OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-ocr.log \
 nohup bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh \
-  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-launcher.log 2>&1 &
+  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-launcher.log 2>&1 &
 ```
 
 Monitor and inspect it with:
 
 ```bash
-tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-model.log
+tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-model.log
 
 python - <<'PY'
 import json
@@ -421,13 +439,15 @@ from pathlib import Path
 
 path = Path(
     "/home/ma-user/work/LLaDA-o/results/"
-    "yarn128k-uncropped-kvretrieve4-ocr-n100/model/"
+    "yarn128k-uncropped-kvretrieve4-masked2-ocr-n100/model/"
     "mind2web_fullpage/part-00000.jsonl"
 )
 record = json.loads(path.read_text().splitlines()[0])
 for key in (
     "kv_cache_retrieval_query",
     "kv_cache_retrieval_query_tokens",
+    "kv_cache_retrieval_score_mode",
+    "kv_cache_retrieval_mask_rounds",
     "kv_cache_retrieval_indices",
     "kv_cache_retrieval_ratio",
     "kv_cache_retrieval_seconds",
@@ -440,28 +460,33 @@ PY
 The retrieval ratio measures selected whole-span KV relative to the dense
 full-page prefix. It is not the compression ratio. A valid run must report
 `kv_cache_retrieval_enabled=true`, the requested source-tile Top-K plus the
-forced overview, `kv_cache_compression_ratio=1.0`, and
+forced overview,
+`kv_cache_retrieval_score_mode="masked_self_information"`,
+`kv_cache_retrieval_mask_rounds=2`, `kv_cache_compression_ratio=1.0`, and
 `kv_cache_compression_seconds=0.0`.
 
-The corrected run on revision `b877dda` used the same ordered 100 sample IDs,
-dense prefix lengths, input-image counts, and generation positions as the
-uncropped no-retrieval YaRN run. It completed without inference errors:
+The following table is retained as a historical causal-scoring baseline. The
+run on revision `b877dda` predates bidirectional masked scoring; its quality
+and latency numbers must not be reported as results of the current method.
+It used the same ordered 100 sample IDs, dense prefix lengths, input-image
+counts, and generation positions as the uncropped no-retrieval YaRN run:
 
 | Configuration | Retrieval query | Target-tile hit | Raw SSR | Final SSR | Joint SSR | Action F1 | Parse | Mean resident / dense prefix | Max RoPE | Mean model latency |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | YaRN 128K + OCR, all original tiles + overview | None; all tiles resident | 100% | 7% | 75% | 75% | 100% | 100% | 33,483 / 33,483 (100%) | 63,120 | 13.36 s |
 | Legacy image Top-4 + overview | Complete grounding prompt | 36% | 0% | 71% | 71% | 100% | 93% | 11,253 / 33,483 (33.61%) | 63,120 | 5.50 s |
-| Corrected image Top-4 + overview | Operation instruction only | 63% | 0% | 71% | 71% | 100% | 93% | 13,399 / 33,483 (40.02%) | 63,120 | 5.89 s |
+| Legacy causal image Top-4 + overview | Operation instruction only | 63% | 0% | 71% | 71% | 100% | 93% | 13,399 / 33,483 (40.02%) | 63,120 | 5.89 s |
 
-The corrected row reduces the token-weighted resident visual/prompt KV working
-set by 59.98%, while losing four final SSR points. Its 5.89-second number
-covers model preprocessing, retrieval, cache construction, and generation;
-as in the existing scorer, it does not include the subsequent OCR fusion
-stage. Across all 100 records, exactly four source tiles plus one overview
-were retained, compression ratio stayed at 1.0, compression time stayed at
-zero, and mean retrieval scoring time was 3.45 seconds. The target-tile hit
-rate is a post-hoc diagnostic computed from ground-truth boxes after inference;
-no target box, DOM field, or provenance description enters the query.
+The legacy operation-only row reduced the token-weighted resident
+visual/prompt KV working set by 59.98%, while losing four final SSR points.
+Its 5.89-second number covers model preprocessing, causal retrieval, cache
+construction, and generation; it does not include the subsequent OCR fusion
+stage. Across all 100 historical records, exactly four source tiles plus one
+overview were retained, compression ratio stayed at 1.0, compression time
+stayed at zero, and mean causal retrieval scoring time was 3.45 seconds. The
+target-tile hit rate is a post-hoc diagnostic computed from ground-truth boxes
+after inference; no target box, DOM field, or provenance description enters
+the query.
 
 ### Five-way comparison on 100 native-16K full-page samples
 

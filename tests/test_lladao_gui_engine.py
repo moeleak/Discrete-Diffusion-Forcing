@@ -346,21 +346,135 @@ def test_generation_attention_mask_rejects_partial_blocks():
         build_generation_attention_mask(3, 6, 4, device=torch.device("cpu"))
 
 
-def test_retrieval_scoring_mask_is_causal_after_stored_context():
+def test_retrieval_masked_queries_are_complementary_and_keep_boundaries():
     from d2f_vllm.lladao_gui_engine import (
-        build_causal_append_attention_mask,
+        build_complementary_masked_queries,
     )
 
-    mask = build_causal_append_attention_mask(
-        2,
-        3,
-        device=torch.device("cpu"),
+    variants = build_complementary_masked_queries(
+        [100, 10, 11, 12, 101],
+        99,
+        mask_rounds=2,
     )
-    assert mask.tolist() == [
-        [True, True, True, False, False],
-        [True, True, True, True, False],
-        [True, True, True, True, True],
+    assert [variant.token_ids for variant in variants] == [
+        (100, 99, 11, 99, 101),
+        (100, 10, 99, 12, 101),
     ]
+    assert [variant.target_indices for variant in variants] == [
+        (1, 3),
+        (2,),
+    ]
+    assert [variant.target_ids for variant in variants] == [
+        (10, 12),
+        (11,),
+    ]
+    scored = [
+        index
+        for variant in variants
+        for index in variant.target_indices
+    ]
+    assert sorted(scored) == [1, 2, 3]
+    assert len(scored) == len(set(scored))
+
+
+def test_retrieval_masked_queries_require_positive_round_count():
+    from d2f_vllm.lladao_gui_engine import (
+        build_complementary_masked_queries,
+    )
+
+    with pytest.raises(ValueError, match="positive"):
+        build_complementary_masked_queries(
+            [100, 10, 101],
+            99,
+            mask_rounds=0,
+        )
+
+
+def test_joint_masked_query_selects_same_position_logits_under_full_prefill():
+    from types import SimpleNamespace
+
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        MaskedQueryVariant,
+    )
+    from d2f_vllm.multimodal.lladao_gui import (
+        LLaDAOGuiImageSpan,
+        LLaDAOGuiPrefix,
+    )
+
+    class FakeModel:
+        def __init__(self):
+            self.call = None
+
+        def __call__(self, input_ids, positions, *, input_embeds):
+            self.call = (input_ids, positions.clone(), input_embeds.clone())
+            return input_embeds
+
+        @staticmethod
+        def compute_logits(hidden):
+            return hidden
+
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    embedding = torch.nn.Embedding(128, 3)
+    with torch.no_grad():
+        embedding.weight.copy_(
+            torch.arange(128 * 3, dtype=torch.float32).reshape(128, 3)
+        )
+    engine.prefix_encoder = SimpleNamespace(token_embedding=embedding)
+    engine.model = FakeModel()
+    engine._ids_tensor = lambda ids: torch.tensor(ids, dtype=torch.long)
+    engine._positions_tensor = lambda positions: torch.tensor(
+        positions, dtype=torch.long
+    )
+    full_prefill_calls = []
+    engine._set_full_prefill_context = (
+        lambda length, slots, *, need_kv_cache_store: full_prefill_calls.append(
+            (length, slots.clone(), need_kv_cache_store)
+        )
+    )
+    prefix = LLaDAOGuiPrefix(
+        image_ids=[1, 2],
+        image_positions=[7, 7],
+        image_embeddings=torch.tensor(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+        ),
+        image_spans=[
+            LLaDAOGuiImageSpan(
+                token_start=0,
+                patch_start=1,
+                patch_end=1,
+                token_end=2,
+                grid_height=0,
+                grid_width=0,
+                source_box=(0, 0, 1, 1),
+            )
+        ],
+        source_width=1,
+        source_height=1,
+        prompt_ids=[],
+        prompt_positions=[],
+    )
+    variant = MaskedQueryVariant(
+        token_ids=(100, 99, 101),
+        target_indices=(1,),
+        target_ids=(10,),
+    )
+    logits = engine._forward_joint_masked_query(
+        prefix,
+        0,
+        variant,
+        [8, 9, 10],
+    )
+    assert torch.equal(logits, embedding(torch.tensor([99])))
+    assert len(full_prefill_calls) == 1
+    assert full_prefill_calls[0][0] == 5
+    assert torch.equal(
+        full_prefill_calls[0][1],
+        torch.arange(5, dtype=torch.int32),
+    )
+    assert full_prefill_calls[0][2] is False
+    assert engine.model.call[0] is None
+    assert engine.model.call[1].tolist() == [7, 7, 8, 9, 10]
 
 
 def test_image_kv_retrieval_selects_whole_chunks_and_forced_overview():
@@ -378,10 +492,12 @@ def test_image_kv_retrieval_selects_whole_chunks_and_forced_overview():
 def test_image_kv_retrieval_config_rejects_token_eviction_modes():
     from d2f_vllm.lladao_gui_engine import LLaDAOGuiKVRetrievalConfig
 
-    with pytest.raises(ValueError, match="self_information"):
+    with pytest.raises(ValueError, match="masked_self_information"):
         LLaDAOGuiKVRetrievalConfig(score_mode="per_head_eviction")
     with pytest.raises(ValueError, match="non-negative"):
         LLaDAOGuiKVRetrievalConfig(topk_images=-1)
+    with pytest.raises(ValueError, match="positive"):
+        LLaDAOGuiKVRetrievalConfig(mask_rounds=0)
 
 
 def test_vision_tiles_preserve_two_dimensional_regions():

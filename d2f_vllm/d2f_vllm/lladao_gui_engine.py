@@ -69,16 +69,20 @@ class LLaDAOGuiKVRetrievalConfig:
 
     enabled: bool = False
     topk_images: int = 4
-    score_mode: str = "self_information"
+    score_mode: str = "masked_self_information"
+    mask_rounds: int = 2
     keep_overview: bool = True
 
     def __post_init__(self) -> None:
         if self.topk_images < 0:
             raise ValueError("topk_images must be non-negative")
-        if self.score_mode != "self_information":
+        if self.score_mode != "masked_self_information":
             raise ValueError(
-                "KV retrieval currently supports score_mode=self_information"
+                "KV retrieval currently supports "
+                "score_mode=masked_self_information"
             )
+        if self.mask_rounds <= 0:
+            raise ValueError("mask_rounds must be positive")
 
 
 @dataclass
@@ -99,6 +103,8 @@ class LLaDAOGuiEngineOutput:
     kv_cache_retrieval_scores: dict[str, float]
     kv_cache_retrieval_query: str | None
     kv_cache_retrieval_query_tokens: int
+    kv_cache_retrieval_score_mode: str | None
+    kv_cache_retrieval_mask_rounds: int
     kv_cache_retrieval_ratio: float
     kv_cache_retrieval_seconds: float
     vision_tiles: int
@@ -216,28 +222,49 @@ def select_top_image_spans(
     return sorted(forced + ranked[:keep])
 
 
-def build_causal_append_attention_mask(
-    context_len: int,
-    active_len: int,
-    *,
-    device: torch.device,
-) -> torch.Tensor:
-    """Let a scoring query attend stored context and its causal query prefix."""
+@dataclass(frozen=True)
+class MaskedQueryVariant:
+    """One deterministic dLLM corruption and its denoising targets."""
 
-    if context_len < 0 or active_len <= 0:
-        raise ValueError("context_len must be non-negative and active_len positive")
-    mask = torch.zeros(
-        (active_len, context_len + active_len),
-        dtype=torch.bool,
-        device=device,
-    )
-    mask[:, :context_len] = True
-    mask[:, context_len:] = torch.ones(
-        (active_len, active_len),
-        dtype=torch.bool,
-        device=device,
-    ).tril()
-    return mask
+    token_ids: tuple[int, ...]
+    target_indices: tuple[int, ...]
+    target_ids: tuple[int, ...]
+
+
+def build_complementary_masked_queries(
+    query_ids: Sequence[int],
+    mask_token_id: int,
+    *,
+    mask_rounds: int = 2,
+) -> list[MaskedQueryVariant]:
+    """Mask every non-boundary query token exactly once across several rounds.
+
+    BOS and EOS remain visible.  Complementary target groups make scoring
+    deterministic while preserving part of the instruction as bidirectional
+    context in every round.
+    """
+
+    if mask_rounds <= 0:
+        raise ValueError("mask_rounds must be positive")
+    clean_ids = tuple(int(token_id) for token_id in query_ids)
+    target_indices = tuple(range(1, len(clean_ids) - 1))
+    if not target_indices:
+        return []
+    rounds = min(int(mask_rounds), len(target_indices))
+    variants: list[MaskedQueryVariant] = []
+    for round_index in range(rounds):
+        selected = target_indices[round_index::rounds]
+        corrupted = list(clean_ids)
+        for index in selected:
+            corrupted[index] = int(mask_token_id)
+        variants.append(
+            MaskedQueryVariant(
+                token_ids=tuple(corrupted),
+                target_indices=tuple(selected),
+                target_ids=tuple(clean_ids[index] for index in selected),
+            )
+        )
+    return variants
 
 
 def build_generation_attention_mask(
@@ -651,91 +678,6 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             need_kv_cache_store=False,
         )
 
-    def _set_causal_append_context(
-        self,
-        *,
-        context_len: int,
-        active_len: int,
-        start_token: int,
-        page_ids: list[int],
-        need_kv_cache_store: bool,
-    ) -> None:
-        device = torch.device("cuda", torch.cuda.current_device())
-        slot_mapping = self._range_slot_mapping(
-            page_ids, start_token, active_len
-        )
-        block_tables = torch.tensor(
-            page_ids, dtype=torch.int32, device=device
-        ).view(1, -1)
-        mask = build_causal_append_attention_mask(
-            context_len,
-            active_len,
-            device=device,
-        )
-        seq = _StaticMaskSeq(mask, self.block_length)
-        set_context_diffusion_lm(
-            False,
-            cu_seqlens_q=torch.tensor(
-                [0, active_len], dtype=torch.int32, device=device
-            ),
-            cu_seqlens_k=torch.tensor(
-                [0, context_len + active_len],
-                dtype=torch.int32,
-                device=device,
-            ),
-            max_seqlen_q=active_len,
-            max_seqlen_k=context_len + active_len,
-            slot_mapping=slot_mapping,
-            context_lens=torch.tensor(
-                [context_len], dtype=torch.int32, device=device
-            ),
-            block_tables=block_tables,
-            seqs=[seq],
-            seq_lens=[active_len],
-            seq_lens_ts=torch.tensor(
-                [active_len], dtype=torch.int32, device=device
-            ),
-            kv_cache_layout="unified",
-            need_kv_cache_store=need_kv_cache_store,
-            full_attention=False,
-        )
-
-    def _forward_append_tokens_causal_paged(
-        self,
-        ids: Sequence[int],
-        positions: Sequence[int],
-        *,
-        context_len: int,
-        page_ids: list[int],
-        start_token: int,
-        need_kv_cache_store: bool = False,
-    ) -> torch.Tensor:
-        if len(ids) != len(positions):
-            raise ValueError(
-                f"ids/positions length mismatch: {len(ids)} vs {len(positions)}"
-            )
-        if not ids:
-            return torch.empty(
-                0,
-                int(self.config.hf_config.vocab_size),
-                device=torch.cuda.current_device(),
-            )
-        self._set_causal_append_context(
-            context_len=context_len,
-            active_len=len(ids),
-            start_token=start_token,
-            page_ids=page_ids,
-            need_kv_cache_store=need_kv_cache_store,
-        )
-        try:
-            hidden = self.model(
-                self._ids_tensor(ids),
-                self._positions_tensor(positions),
-            )
-            return self.model.compute_logits(hidden)
-        finally:
-            reset_context_diffusion_lm()
-
     def _forward_image_spans(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -789,14 +731,74 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 f"expected {len(prefix.image_ids)}"
             )
 
-    def _score_image_span_self_information(
+    def _forward_joint_masked_query(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_index: int,
+        variant: MaskedQueryVariant,
+        query_positions: Sequence[int],
+    ) -> torch.Tensor:
+        """Run one candidate image and corrupted query as a full document."""
+
+        if len(variant.token_ids) != len(query_positions):
+            raise ValueError(
+                "masked query ids/positions length mismatch: "
+                f"{len(variant.token_ids)} vs {len(query_positions)}"
+            )
+        span = prefix.image_spans[span_index]
+        image_embeddings = prefix.image_embeddings[
+            span.token_start : span.token_end
+        ]
+        query_embeddings = self.prefix_encoder.token_embedding(
+            self._ids_tensor(variant.token_ids)
+        )
+        joint_embeddings = torch.cat(
+            (image_embeddings, query_embeddings.to(image_embeddings.dtype)),
+            dim=0,
+        )
+        joint_positions = [
+            *prefix.image_positions[span.token_start : span.token_end],
+            *map(int, query_positions),
+        ]
+        seq_len = int(joint_embeddings.shape[0])
+        slot_mapping = torch.arange(
+            seq_len,
+            dtype=torch.int32,
+            device=joint_embeddings.device,
+        )
+        self._set_full_prefill_context(
+            seq_len,
+            slot_mapping,
+            need_kv_cache_store=False,
+        )
+        try:
+            hidden = self.model(
+                None,
+                self._positions_tensor(joint_positions),
+                input_embeds=joint_embeddings,
+            )
+            absolute_targets = torch.tensor(
+                [
+                    len(image_embeddings) + index
+                    for index in variant.target_indices
+                ],
+                dtype=torch.long,
+                device=hidden.device,
+            )
+            return self.model.compute_logits(
+                hidden.index_select(0, absolute_targets)
+            )
+        finally:
+            reset_context_diffusion_lm()
+
+    def _score_image_span_masked_self_information(
         self,
         prefix: LLaDAOGuiPrefix,
         span_index: int,
         query_ids: Sequence[int],
         query_positions: Sequence[int],
     ) -> float:
-        """Score one complete visual KV chunk by causal query likelihood."""
+        """Score a visual chunk with bidirectional dLLM denoising likelihood."""
 
         span = prefix.image_spans[span_index]
         span_len = span.token_end - span.token_start
@@ -806,35 +808,38 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 f"retrieval scoring length {scoring_len} exceeds "
                 f"kv_cache_capacity={self.kv_cache_capacity}"
             )
-        page_ids = self._prefix_cache.allocate_pages(
-            math.ceil(scoring_len / self.page_size)
+        variants = build_complementary_masked_queries(
+            query_ids,
+            self.mask_token_id,
+            mask_rounds=self.kv_retrieval.mask_rounds,
         )
-        try:
-            cached = self._forward_image_spans(
+        if not variants:
+            return float("-inf")
+        total_nll: torch.Tensor | None = None
+        scored_tokens = 0
+        for variant in variants:
+            logits = self._forward_joint_masked_query(
                 prefix,
-                page_ids,
-                [span_index],
-            )
-            logits = self._forward_append_tokens_causal_paged(
-                query_ids,
+                span_index,
+                variant,
                 query_positions,
-                context_len=cached,
-                page_ids=page_ids,
-                start_token=cached,
-                need_kv_cache_store=False,
             )
-            if len(query_ids) < 2:
-                return float("-inf")
-            labels = self._ids_tensor(query_ids[1:])
-            token_nll = F.cross_entropy(
-                logits[:-1].float(),
+            labels = self._ids_tensor(variant.target_ids)
+            round_nll = F.cross_entropy(
+                logits.float(),
                 labels,
-                reduction="none",
+                reduction="sum",
             )
-            score = float(-token_nll.mean().item())
-            return score if math.isfinite(score) else float("-inf")
-        finally:
-            self._prefix_cache.release_pages(page_ids)
+            total_nll = (
+                round_nll
+                if total_nll is None
+                else total_nll + round_nll
+            )
+            scored_tokens += len(variant.target_ids)
+        if total_nll is None or scored_tokens <= 0:
+            return float("-inf")
+        score = float(-(total_nll / scored_tokens).item())
+        return score if math.isfinite(score) else float("-inf")
 
     def _select_retrieved_image_spans(
         self,
@@ -844,7 +849,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         query_ids: Sequence[int],
         query_positions: Sequence[int],
     ) -> tuple[list[int], dict[int, float], int]:
-        """Apply reference-style single-chunk self-information retrieval."""
+        """Apply single-image bidirectional masked self-information retrieval."""
 
         span_count = len(prefix.image_spans)
         overview_index = span_count - 1 if has_overview else None
@@ -860,7 +865,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         )
         scores = [float("-inf")] * span_count
         for index in candidates:
-            scores[index] = self._score_image_span_self_information(
+            scores[index] = self._score_image_span_masked_self_information(
                 prefix,
                 index,
                 query_ids,
@@ -1387,6 +1392,16 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 },
                 kv_cache_retrieval_query=retrieval_query_text,
                 kv_cache_retrieval_query_tokens=len(retrieval_query_ids),
+                kv_cache_retrieval_score_mode=(
+                    self.kv_retrieval.score_mode
+                    if self.kv_retrieval.enabled
+                    else None
+                ),
+                kv_cache_retrieval_mask_rounds=(
+                    self.kv_retrieval.mask_rounds
+                    if self.kv_retrieval.enabled
+                    else 0
+                ),
                 kv_cache_retrieval_ratio=(
                     retrieved_prefix_len / prefix.length
                 ),
