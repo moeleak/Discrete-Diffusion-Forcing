@@ -632,6 +632,13 @@ def extract_arm_rows(
         "Sample ID SHA-256": arm["fingerprint"]["sample_ids_sha256"],
         "Manifest SHA-256": arm["fingerprint"]["manifest_sha256"],
         "Revision": arm["revision"],
+        "Worktree": (
+            "dirty"
+            if arm.get("worktree_dirty")
+            else "clean"
+            if arm.get("worktree_dirty") is False
+            else "unknown"
+        ),
         "Input processing": protocol["input_processing"],
         "RoPE": protocol["rope"],
         "Max context": protocol["max_context"],
@@ -812,6 +819,16 @@ def git_revision(repo: Path) -> str:
     return completed.stdout.strip()
 
 
+def git_worktree_dirty(repo: Path) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return bool(completed.stdout)
+
+
 def default_run_id(target: str) -> str:
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     return f"{target}-{timestamp}"
@@ -847,6 +864,7 @@ def build_arm_record(
     run_id: str,
     revision: str,
     fingerprint: dict[str, Any],
+    worktree_dirty: bool = False,
 ) -> dict[str, Any]:
     spec = BENCHMARKS[benchmark_name]
     identifier = arm_id(benchmark_name, dataset_name)
@@ -884,6 +902,7 @@ def build_arm_record(
         "protocol": protocol_dict(spec),
         "fingerprint": saved_fingerprint,
         "revision": revision,
+        "worktree_dirty": worktree_dirty,
         "status": "pending",
     }
 
@@ -949,6 +968,7 @@ def run_selection(args: argparse.Namespace) -> Path | None:
     if not lladao_repo.is_dir():
         raise FileNotFoundError(f"missing LLaDA-o repository: {lladao_repo}")
     revision = git_revision(repo)
+    worktree_dirty = git_worktree_dirty(repo)
     selected_datasets = selection_dataset_names(selection)
     if args.benchmark_root and len(selected_datasets) != 1:
         raise ValueError(
@@ -995,6 +1015,7 @@ def run_selection(args: argparse.Namespace) -> Path | None:
                 run_id=run_id,
                 revision=revision,
                 fingerprint=fingerprints[dataset_name],
+                worktree_dirty=worktree_dirty,
             )
         )
 
@@ -1005,6 +1026,7 @@ def run_selection(args: argparse.Namespace) -> Path | None:
                     "target": selection.target,
                     "run_dir": str(run_dir),
                     "revision": revision,
+                    "worktree_dirty": worktree_dirty,
                     "limit": args.limit,
                     "gpu": args.gpu,
                     "arms": [
@@ -1057,6 +1079,7 @@ def run_selection(args: argparse.Namespace) -> Path | None:
         "repo": str(repo),
         "lladao_repo": str(lladao_repo),
         "revision": revision,
+        "worktree_dirty": worktree_dirty,
         "limit": args.limit,
         "gpu": args.gpu,
         "groups": groups,

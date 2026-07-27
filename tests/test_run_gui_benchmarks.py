@@ -253,6 +253,7 @@ def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
     assert performance["KV reduction (%)"] == 25.0
     assert performance["Max actual RoPE"] == 111.0
     assert len(protocol["Manifest SHA-256"]) == 64
+    assert protocol["Worktree"] == "clean"
     for name in ("quality", "performance", "protocol"):
         for suffix in ("md", "csv", "json"):
             assert (run_dir / "tables" / f"{name}.{suffix}").is_file()

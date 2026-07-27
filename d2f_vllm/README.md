@@ -148,9 +148,11 @@ The quality table reports raw/final SSR, joint SSR, action F1, and parse rate.
 The performance table reports latency, throughput, resident/dense KV, actual
 maximum RoPE position, peak memory, and errors. The protocol table freezes the
 input mode, RoPE/KV/OCR settings, Git revision, manifest hash, and ordered
-sample-ID SHA-256. A comparison table is rejected if its arms do not have the
-same sample fingerprint. Regenerate and revalidate the tables of an existing
-unified run without performing inference with:
+sample-ID SHA-256. It also labels the runtime checkout as `clean` or `dirty`
+so a revision is never mistaken for an exact clean checkout. A comparison
+table is rejected if its arms do not have the same sample fingerprint.
+Regenerate and revalidate the tables of an existing unified run without
+performing inference with:
 
 ```bash
 python D2F-eval/run_gui_benchmarks.py report \
