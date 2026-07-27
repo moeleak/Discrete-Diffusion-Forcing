@@ -218,8 +218,8 @@ clear-query causal next-token likelihood, while the default arm uses two
 complementary masked queries with full bidirectional attention. Ground-truth
 boxes are read only by the report step for target-tile recall.
 
-The clean, controlled run on revision `34593f2` used ordered sample-ID
-SHA-256
+The clean, controlled run on revision `34593f2` used sequential masked
+scoring and ordered sample-ID SHA-256
 `8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
 All three arms completed 100 samples without errors:
 
@@ -239,9 +239,9 @@ loses one final-SSR sample and gains none.
 
 Masked retrieval therefore fixes the causal scorer's relevance failure and
 keeps quality within one point of dense context, while reducing mean resident
-KV by 53.43%. It is not a latency optimization in this single-request
-implementation: its two scoring rounds make mean latency 52.13% higher than
-dense and 52.63% higher than causal. Peak allocated memory falls by only
+KV by 53.43%. This table predates packed scoring: the sequential implementation
+made mean latency 52.13% higher than dense and 52.63% higher than causal. Peak
+allocated memory falls by only
 1.13 GiB versus dense because the model and preallocated cache dominate that
 measurement. The lower causal convergence-step count is caused by malformed
 or early-terminated outputs and must not be interpreted as better decoding.
@@ -452,10 +452,23 @@ non-boundary query token exactly once. Each candidate image and corrupted
 query are evaluated together with full bidirectional attention, and CE is
 read only from the original positions of the masked tokens. This avoids both
 next-token causal scoring and target leakage from a visible answer token. The
-runtime retains the top four complete image spans and force-keeps the resized
-whole-page overview. Selection never drops individual patch tokens, layers,
-or KV heads, so this mode is mutually exclusive with
-`KV_CACHE_COMPRESSION=1`.
+runtime packs independent candidate/round documents into FlashAttention
+varlen batches by default. `cu_seqlens` keeps their attention domains
+disjoint, so batching changes the number of model calls without changing the
+bidirectional scoring formula. The runtime retains the top four complete
+image spans and force-keeps the resized whole-page overview. Selection never
+drops individual patch tokens, layers, or KV heads, so this mode is mutually
+exclusive with `KV_CACHE_COMPRESSION=1`.
+
+`KV_RETRIEVAL_PACKED_SCORING=1` and
+`KV_RETRIEVAL_MAX_BATCH_TOKENS=65536` are the defaults. The token budget is a
+soft cap over the independent documents in one forward; a single larger
+document is still admitted after the normal per-document context check. Lower
+the budget to reduce transient activation memory, or set
+`KV_RETRIEVAL_PACKED_SCORING=0` to reproduce the sequential implementation
+for score/selection equivalence tests. If the FlashAttention varlen operator
+is unavailable, the runtime safely falls back to sequential scoring and
+reports `kv_cache_retrieval_packed_scoring=false`.
 
 For controlled regression experiments only,
 `KV_RETRIEVAL_SCORE_MODE=causal_self_information` restores the retired
@@ -483,17 +496,19 @@ LIMIT=100 \
 GPU=0 \
 KV_RETRIEVAL_TOPK_IMAGES=4 \
 KV_RETRIEVAL_MASK_ROUNDS=2 \
-RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-kvretrieve4-masked2-ocr-n100 \
-MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-model.log \
-OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-ocr.log \
+KV_RETRIEVAL_PACKED_SCORING=1 \
+KV_RETRIEVAL_MAX_BATCH_TOKENS=65536 \
+RESULT_ROOT=/home/ma-user/work/LLaDA-o/results/yarn128k-uncropped-kvretrieve4-masked2-packed65536-ocr-n100 \
+MODEL_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-packed65536-model.log \
+OCR_LOG=/home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-packed65536-ocr.log \
 nohup bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh \
-  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-launcher.log 2>&1 &
+  > /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-packed65536-launcher.log 2>&1 &
 ```
 
 Monitor and inspect it with:
 
 ```bash
-tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-model.log
+tail -F /home/ma-user/work/LLaDA-o/logs/yarn128k-uncropped-kvretrieve4-masked2-packed65536-model.log
 
 python - <<'PY'
 import json
@@ -501,7 +516,7 @@ from pathlib import Path
 
 path = Path(
     "/home/ma-user/work/LLaDA-o/results/"
-    "yarn128k-uncropped-kvretrieve4-masked2-ocr-n100/model/"
+    "yarn128k-uncropped-kvretrieve4-masked2-packed65536-ocr-n100/model/"
     "mind2web_fullpage/part-00000.jsonl"
 )
 record = json.loads(path.read_text().splitlines()[0])
@@ -510,6 +525,9 @@ for key in (
     "kv_cache_retrieval_query_tokens",
     "kv_cache_retrieval_score_mode",
     "kv_cache_retrieval_mask_rounds",
+    "kv_cache_retrieval_packed_scoring",
+    "kv_cache_retrieval_score_batches",
+    "kv_cache_retrieval_max_batch_tokens",
     "kv_cache_retrieval_indices",
     "kv_cache_retrieval_ratio",
     "kv_cache_retrieval_seconds",
@@ -524,7 +542,9 @@ full-page prefix. It is not the compression ratio. A valid run must report
 `kv_cache_retrieval_enabled=true`, the requested source-tile Top-K plus the
 forced overview,
 `kv_cache_retrieval_score_mode="masked_self_information"`,
-`kv_cache_retrieval_mask_rounds=2`, `kv_cache_compression_ratio=1.0`, and
+`kv_cache_retrieval_mask_rounds=2`,
+`kv_cache_retrieval_packed_scoring=true`, a positive
+`kv_cache_retrieval_score_batches`, `kv_cache_compression_ratio=1.0`, and
 `kv_cache_compression_seconds=0.0`.
 
 The following table is retained as a historical causal-scoring baseline. The

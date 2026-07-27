@@ -395,10 +395,16 @@ full-resolution image tile by native dLLM bidirectional masked
 self-information. Every non-boundary query token is scored once at its
 original masked position; the candidate image and corrupted query share one
 full-attention document, so no next-token shift or visible-target leakage is
-used. The runtime keeps all KV tokens from the top four tiles and always keeps
-the whole-page overview as the coordinate anchor. It records the exact
-retrieval query, score mode, mask rounds, indices, scores, latency, and
-resident/dense prefix ratio separately from KV compression;
+used. Independent candidate/round documents are packed into FlashAttention
+varlen forwards by default, with sequence boundaries preserving exactly the
+same bidirectional attention as sequential scoring. The default soft budget is
+65,536 packed tokens; set `KV_RETRIEVAL_PACKED_SCORING=0` for an equivalence
+regression or tune `KV_RETRIEVAL_MAX_BATCH_TOKENS` to trade peak memory for
+fewer model calls. The runtime keeps all KV tokens from the top four tiles and
+always keeps the whole-page overview as the coordinate anchor. It records the
+exact retrieval query, score mode, mask rounds, packed-scoring status, scoring
+batch count, indices, scores, latency, and resident/dense prefix ratio
+separately from KV compression;
 `kv_cache_compression_ratio` remains 1.0.
 
 To compare the dense context, retired causal retrieval scorer, and current
@@ -414,12 +420,13 @@ python D2F-eval/run_gui_benchmarks.py run \
 The runner serializes the arms, verifies their ordered sample-ID fingerprint,
 and emits Markdown/CSV/JSON quality, performance, and protocol tables.
 
-The clean 100-sample run on revision `34593f2` found 75% final SSR for dense
-context, 71% for legacy causal Top-4 retrieval, and 74% for bidirectional
-masked Top-4 retrieval. Target-tile recall improved from 63% causal to 90%
-masked. Masked retrieval reduced mean resident KV by 53.43% versus dense, but
-its two scoring rounds increased single-request mean latency from 5.93 to
-9.03 seconds. Full tables and per-sample outputs are in
+The clean 100-sample run on revision `34593f2` predates packed scoring and
+found 75% final SSR for dense context, 71% for legacy causal Top-4 retrieval,
+and 74% for sequential bidirectional masked Top-4 retrieval. Target-tile
+recall improved from 63% causal to 90% masked. Masked retrieval reduced mean
+resident KV by 53.43% versus dense, but its two sequential scoring rounds
+increased single-request mean latency from 5.93 to 9.03 seconds. Full tables
+and per-sample outputs are in
 `$ROOT/results/gui-benchmarks/kv-retrieval-scoring-ablation-n100-34593f2`.
 
 The previously recorded first-100 Top-4 result—0% raw SSR, 71% OCR SSR and
