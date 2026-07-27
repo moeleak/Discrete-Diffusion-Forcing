@@ -1472,7 +1472,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all six suites")
+    print("\n  all                            run all seven suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
