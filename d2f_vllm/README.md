@@ -178,6 +178,38 @@ so the experiment does not introduce interior-tile padding. The runtime
 prompt derives its image count from the selected tile size instead of reusing
 the prepared 980px layout.
 
+The validated 100-sample run used ordered sample-ID SHA-256
+`8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
+All arms completed without inference errors:
+
+| Tile size | Raw SSR | OCR SSR | Δ OCR SSR | Mean latency | Speed vs 980 | P95 latency | Mean / max input images | Mean / max dense prefix | Peak allocated |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 980px | 7% | **75%** | — | 5.861 s | 1.000× | 9.010 s | 11.86 / 21 | 33,483 / 63,057 | 50.907 GiB |
+| 686px | **8%** | 74% | -1 pp | **5.837 s** | **1.004×** | 9.436 s | 16.22 / 29 | 33,492 / 63,073 | 50.912 GiB |
+| 490px | 4% | 74% | -1 pp | 6.537 s | 0.897× | 10.367 s | 31.96 / 61 | 33,524 / 63,137 | 50.913 GiB |
+
+The 686px arm is only 0.41% faster in mean latency, while its P95 is 4.72%
+slower and final SSR is one point lower. Its raw-SSR change is not stable: it
+gains five samples and loses four relative to 980px. After OCR fusion it gains
+two and loses three. The 490px arm increases mean latency by 11.53%, nearly
+2.7× the number of input images, and does not recover the quality point.
+Because every source pixel remains present, smaller tiles do not materially
+reduce dense KV tokens or peak memory; they mainly add image-boundary and
+scheduling overhead. All three fused arms have 100% action F1 and parse rate.
+Keep 980px as the default for this configuration.
+
+The complete Markdown, CSV, JSON, logs, manifests, and per-sample predictions
+are under:
+
+```text
+/home/ma-user/work/LLaDA-o/results/gui-benchmarks/tile-size-ablation-n100-9a34a5f
+```
+
+The runtime worktree could not be reset because it contains the other
+in-progress runtime changes, so `run.json` correctly labels it `dirty` at
+`9e544d1`. The evaluator, unified runner, and launcher used by the run were
+byte-identical to pushed commit `9a34a5f`.
+
 The native GUI Non-PD path supports a reproducible 128K YaRN configuration
 without forcing the KV cache to reserve the full positional limit:
 
