@@ -646,8 +646,16 @@ def extract_arm_rows(
         "Mean convergence steps": summary_value(
             raw_metrics, "convergence_steps", "mean"
         ),
-        "Mean latency (s)": summary_value(runtime, "model_elapsed_seconds", "mean"),
-        "P95 latency (s)": summary_value(runtime, "model_elapsed_seconds", "p95"),
+        "Mean end-to-end latency (s)": summary_value(
+            raw_metrics, "latency_seconds", "mean"
+        ),
+        "P95 end-to-end latency (s)": summary_value(
+            raw_metrics, "latency_seconds", "p95"
+        ),
+        "Mean model latency (s)": summary_value(
+            runtime, "model_elapsed_seconds", "mean"
+        ),
+        "P95 model latency (s)": summary_value(runtime, "model_elapsed_seconds", "p95"),
         "Mean tokens/s": summary_value(runtime, "total_tokens_per_second", "mean"),
         "Mean resident KV": resident,
         "Mean dense prefix": dense,

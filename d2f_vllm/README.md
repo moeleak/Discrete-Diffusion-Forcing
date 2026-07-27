@@ -146,13 +146,13 @@ tables/protocol.{md,csv,json}
 ```
 
 The quality table reports raw/final SSR, joint SSR, action F1, and parse rate.
-The performance table reports block size, convergence steps, latency,
-throughput, resident/dense KV, actual maximum RoPE position, peak memory, and
-errors. The protocol table freezes the input mode, RoPE/KV/OCR settings, Git
-revision, manifest hash, and ordered sample-ID SHA-256. It also labels the
-runtime checkout as `clean` or `dirty` so a revision is never mistaken for an
-exact clean checkout. A comparison table is rejected if its arms do not have
-the same sample fingerprint.
+The performance table reports block size, convergence steps, synchronized
+end-to-end latency, model-only latency, throughput, resident/dense KV, actual
+maximum RoPE position, peak memory, and errors. The protocol table freezes the
+input mode, RoPE/KV/OCR settings, Git revision, manifest hash, and ordered
+sample-ID SHA-256. It also labels the runtime checkout as `clean` or `dirty`
+so a revision is never mistaken for an exact clean checkout. A comparison
+table is rejected if its arms do not have the same sample fingerprint.
 Regenerate and revalidate the tables of an existing unified run without
 performing inference with:
 
@@ -173,6 +173,24 @@ native RoPE positions, 64 generated tokens, decoding thresholds, prompt,
 seed, dense 16K-resident KV, and no OCR or KV compression. Only the diffusion
 block size changes from 16 to 8 to 4. These are inference-time settings and do
 not require retraining.
+
+The validated 100-sample run used ordered sample-ID SHA-256
+`8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
+All arms completed without inference errors:
+
+| Block size | SSR | Δ SSR vs 16 | Action F1 | Parse | Mean conv. steps | Mean end-to-end | P95 end-to-end | Mean model latency | Relative speed vs 16 | Peak allocated |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 26% | — | 100% | 96% | 13.36 | 1.096 s | 1.121 s | 1.063 s | 1.000× | 24.83 GiB |
+| 8 | 27% | +1 pp | 100% | 98% | 12.62 | 1.098 s | 1.434 s | 1.072 s | 0.997× | 24.83 GiB |
+| 4 | 27% | +1 pp | 100% | 96% | 13.06 | 1.269 s | 1.561 s | 1.237 s | 0.863× | 24.83 GiB |
+
+Block 8 did not produce a meaningful speedup: mean end-to-end latency was
+0.26% higher than block 16, while P95 latency was higher. Its one-point SSR
+gain is also not a stable monotonic improvement: relative to block 16 it lost
+four previously correct samples and gained five different samples. Block 4
+increased mean latency by 15.83% with no additional SSR or memory benefit.
+For this native-resize model-only protocol, block 16 remains the best latency
+default; block 8 is the reasonable smaller-block quality candidate.
 
 The native GUI Non-PD path supports a reproducible 128K YaRN configuration
 without forcing the KV cache to reserve the full positional limit:

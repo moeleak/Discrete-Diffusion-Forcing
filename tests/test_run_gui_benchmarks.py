@@ -84,6 +84,7 @@ def write_scores(
                         "action_f1_macro_present": 1.0,
                         "parse_rate": 1.0,
                         "convergence_steps": summary(14.0),
+                        "latency_seconds": summary(4.2),
                     }
                 },
                 "runtime": {
@@ -268,6 +269,8 @@ def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
     assert performance["KV reduction (%)"] == 25.0
     assert performance["Max actual RoPE"] == 111.0
     assert performance["Mean convergence steps"] == 14.0
+    assert performance["Mean end-to-end latency (s)"] == 4.2
+    assert performance["Mean model latency (s)"] == 4.0
     assert len(protocol["Manifest SHA-256"]) == 64
     assert protocol["Worktree"] == "clean"
     for name in ("quality", "performance", "protocol"):
