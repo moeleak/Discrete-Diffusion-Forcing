@@ -144,6 +144,8 @@ BENCHMARKS = {
             KV_RETRIEVAL_TOPK_IMAGES="4",
             KV_RETRIEVAL_SCORE_MODE="masked_self_information",
             KV_RETRIEVAL_MASK_ROUNDS="2",
+            KV_RETRIEVAL_PACKED_SCORING="1",
+            KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
         ),
         input_processing="Top-4 exact 980px tiles + forced overview",
         rope="YaRN factor 8",
@@ -368,6 +370,8 @@ BENCHMARKS["yarn128k-kv-top4-causal-ocr"] = replace(
         KV_RETRIEVAL_TOPK_IMAGES="4",
         KV_RETRIEVAL_SCORE_MODE="causal_self_information",
         KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="1",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; legacy causal next-token scoring; "
@@ -828,6 +832,10 @@ def extract_arm_rows(
             retrieval_predictions,
             "kv_cache_retrieval_candidates",
         ),
+        "Mean retrieval score batches": numeric_mean(
+            retrieval_predictions,
+            "kv_cache_retrieval_score_batches",
+        ),
         "Mean selected images": numeric_mean(
             retrieval_predictions,
             "kv_cache_retrieval_selected",
@@ -1075,6 +1083,16 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         "retrieval_score_mode": score_mode or "disabled",
         "retrieval_mask_rounds": (
             int(environment["KV_RETRIEVAL_MASK_ROUNDS"])
+            if score_mode == "masked_self_information"
+            else 0
+        ),
+        "retrieval_packed_scoring": (
+            environment.get("KV_RETRIEVAL_PACKED_SCORING", "1") == "1"
+            if score_mode == "masked_self_information"
+            else False
+        ),
+        "retrieval_max_batch_tokens": (
+            int(environment.get("KV_RETRIEVAL_MAX_BATCH_TOKENS", "65536"))
             if score_mode == "masked_self_information"
             else 0
         ),

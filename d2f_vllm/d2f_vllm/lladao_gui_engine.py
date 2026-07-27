@@ -24,6 +24,7 @@ from d2f_vllm.utils.context import (
     reset_context_diffusion_lm,
     set_context_diffusion_lm,
 )
+from d2f_vllm.utils.vllm_flash import flash_attn_varlen_func
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ class LLaDAOGuiKVRetrievalConfig:
     topk_images: int = 4
     score_mode: str = "masked_self_information"
     mask_rounds: int = 2
+    packed_scoring: bool = True
+    max_batch_tokens: int = 65_536
     keep_overview: bool = True
 
     def __post_init__(self) -> None:
@@ -86,6 +89,8 @@ class LLaDAOGuiKVRetrievalConfig:
             )
         if self.mask_rounds <= 0:
             raise ValueError("mask_rounds must be positive")
+        if self.max_batch_tokens <= 0:
+            raise ValueError("max_batch_tokens must be positive")
 
 
 @dataclass
@@ -108,6 +113,9 @@ class LLaDAOGuiEngineOutput:
     kv_cache_retrieval_query_tokens: int
     kv_cache_retrieval_score_mode: str | None
     kv_cache_retrieval_mask_rounds: int
+    kv_cache_retrieval_packed_scoring: bool
+    kv_cache_retrieval_score_batches: int
+    kv_cache_retrieval_max_batch_tokens: int
     kv_cache_retrieval_ratio: float
     kv_cache_retrieval_seconds: float
     vision_tiles: int
@@ -232,6 +240,55 @@ class MaskedQueryVariant:
     token_ids: tuple[int, ...]
     target_indices: tuple[int, ...]
     target_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class MaskedScoringRequest:
+    """One candidate-image and masked-query sequence in a packed forward."""
+
+    span_index: int
+    variant_index: int
+    sequence_length: int
+
+
+def build_masked_scoring_batches(
+    span_lengths: Sequence[tuple[int, int]],
+    query_length: int,
+    variant_count: int,
+    max_batch_tokens: int,
+) -> list[list[MaskedScoringRequest]]:
+    """Greedily pack independent scoring documents without changing order."""
+
+    if query_length <= 0:
+        raise ValueError("query_length must be positive")
+    if variant_count <= 0:
+        raise ValueError("variant_count must be positive")
+    if max_batch_tokens <= 0:
+        raise ValueError("max_batch_tokens must be positive")
+    batches: list[list[MaskedScoringRequest]] = []
+    current: list[MaskedScoringRequest] = []
+    current_tokens = 0
+    for raw_index, raw_length in span_lengths:
+        span_index = int(raw_index)
+        span_length = int(raw_length)
+        if span_index < 0 or span_length <= 0:
+            raise ValueError("span indices must be non-negative and lengths positive")
+        sequence_length = span_length + int(query_length)
+        for variant_index in range(int(variant_count)):
+            request = MaskedScoringRequest(
+                span_index=span_index,
+                variant_index=variant_index,
+                sequence_length=sequence_length,
+            )
+            if current and current_tokens + sequence_length > max_batch_tokens:
+                batches.append(current)
+                current = []
+                current_tokens = 0
+            current.append(request)
+            current_tokens += sequence_length
+    if current:
+        batches.append(current)
+    return batches
 
 
 def build_complementary_masked_queries(
@@ -905,6 +962,186 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         finally:
             reset_context_diffusion_lm()
 
+    def _set_packed_full_prefill_context(
+        self,
+        sequence_lengths: Sequence[int],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Configure independent full-attention documents in one varlen batch."""
+
+        lengths = [int(length) for length in sequence_lengths]
+        if not lengths or any(length <= 0 for length in lengths):
+            raise ValueError("packed sequence lengths must be positive")
+        total_length = sum(lengths)
+        if int(slot_mapping.numel()) != total_length:
+            raise ValueError(
+                "packed slot mapping length mismatch: "
+                f"{slot_mapping.numel()} vs {total_length}"
+            )
+        device = slot_mapping.device
+        lengths_tensor = torch.tensor(
+            lengths,
+            dtype=torch.int32,
+            device=device,
+        )
+        cu_seqlens = torch.zeros(
+            len(lengths) + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        cu_seqlens[1:] = torch.cumsum(lengths_tensor, dim=0)
+        set_context_diffusion_lm(
+            True,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max(lengths),
+            max_seqlen_k=max(lengths),
+            slot_mapping=slot_mapping.to(dtype=torch.int32),
+            context_lens=torch.zeros(
+                len(lengths),
+                dtype=torch.int32,
+                device=device,
+            ),
+            block_tables=None,
+            seqs=None,
+            seq_lens=lengths,
+            seq_lens_ts=lengths_tensor,
+            kv_cache_layout=self.config.kv_cache_layout,
+            need_kv_cache_store=False,
+            full_attention=True,
+        )
+
+    def _forward_packed_masked_queries(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        requests: Sequence[MaskedScoringRequest],
+        variants: Sequence[MaskedQueryVariant],
+        query_positions: Sequence[int],
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        list[tuple[int, int, int]],
+    ]:
+        """Score independent image/query documents in one varlen forward.
+
+        The returned ranges address rows in the logits/labels tensors and keep
+        each request's reduction separate.  Varlen sequence boundaries prevent
+        any candidate image or corrupted query from attending another request.
+        """
+
+        if not requests:
+            raise ValueError("packed masked scoring requests cannot be empty")
+        query_positions_list = [int(position) for position in query_positions]
+        query_embeddings = [
+            self.prefix_encoder.token_embedding(
+                self._ids_tensor(variant.token_ids)
+            )
+            for variant in variants
+        ]
+        documents: list[torch.Tensor] = []
+        positions: list[int] = []
+        target_indices: list[int] = []
+        target_ids: list[int] = []
+        target_ranges: list[tuple[int, int, int]] = []
+        sequence_lengths: list[int] = []
+        document_offset = 0
+        target_offset = 0
+
+        for request in requests:
+            if (
+                request.span_index < 0
+                or request.span_index >= len(prefix.image_spans)
+            ):
+                raise ValueError(
+                    f"image span index out of range: {request.span_index}"
+                )
+            if (
+                request.variant_index < 0
+                or request.variant_index >= len(variants)
+            ):
+                raise ValueError(
+                    "masked query variant index out of range: "
+                    f"{request.variant_index}"
+                )
+            variant = variants[request.variant_index]
+            if len(variant.token_ids) != len(query_positions_list):
+                raise ValueError(
+                    "masked query ids/positions length mismatch: "
+                    f"{len(variant.token_ids)} vs "
+                    f"{len(query_positions_list)}"
+                )
+            span = prefix.image_spans[request.span_index]
+            image_embeddings = prefix.image_embeddings[
+                span.token_start : span.token_end
+            ]
+            query_embedding = query_embeddings[request.variant_index].to(
+                dtype=image_embeddings.dtype
+            )
+            document = torch.cat(
+                (image_embeddings, query_embedding),
+                dim=0,
+            )
+            sequence_length = int(document.shape[0])
+            if sequence_length != request.sequence_length:
+                raise ValueError(
+                    "packed scoring request length mismatch: "
+                    f"{sequence_length} vs {request.sequence_length}"
+                )
+            documents.append(document)
+            sequence_lengths.append(sequence_length)
+            positions.extend(
+                prefix.image_positions[span.token_start : span.token_end]
+            )
+            positions.extend(query_positions_list)
+            target_indices.extend(
+                document_offset + len(image_embeddings) + index
+                for index in variant.target_indices
+            )
+            target_ids.extend(variant.target_ids)
+            next_target_offset = target_offset + len(variant.target_ids)
+            target_ranges.append(
+                (
+                    request.span_index,
+                    target_offset,
+                    next_target_offset,
+                )
+            )
+            document_offset += sequence_length
+            target_offset = next_target_offset
+
+        packed_embeddings = torch.cat(documents, dim=0)
+        slot_mapping = torch.arange(
+            document_offset,
+            dtype=torch.int32,
+            device=packed_embeddings.device,
+        )
+        self._set_packed_full_prefill_context(
+            sequence_lengths,
+            slot_mapping,
+        )
+        try:
+            hidden = self.model(
+                None,
+                self._positions_tensor(positions),
+                input_embeds=packed_embeddings,
+            )
+            absolute_targets = torch.tensor(
+                target_indices,
+                dtype=torch.long,
+                device=hidden.device,
+            )
+            logits = self.model.compute_logits(
+                hidden.index_select(0, absolute_targets)
+            )
+            labels = torch.tensor(
+                target_ids,
+                dtype=torch.long,
+                device=logits.device,
+            )
+            return logits, labels, target_ranges
+        finally:
+            reset_context_diffusion_lm()
+
     def _score_image_span_masked_self_information(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -954,6 +1191,131 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             return float("-inf")
         score = float(-(total_nll / scored_tokens).item())
         return score if math.isfinite(score) else float("-inf")
+
+    def _score_image_spans_masked_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        candidate_indices: Sequence[int],
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
+    ) -> tuple[dict[int, float], int, bool]:
+        """Score all candidates, using equivalent packed varlen attention."""
+
+        candidates = [int(index) for index in candidate_indices]
+        if not candidates:
+            return {}, 0, False
+        variants = build_complementary_masked_queries(
+            query_ids,
+            self.mask_token_id,
+            mask_rounds=self.kv_retrieval.mask_rounds,
+        )
+        if not variants:
+            return (
+                {index: float("-inf") for index in candidates},
+                0,
+                False,
+            )
+        span_lengths: list[tuple[int, int]] = []
+        for index in candidates:
+            if index < 0 or index >= len(prefix.image_spans):
+                raise ValueError(f"image span index out of range: {index}")
+            span = prefix.image_spans[index]
+            span_length = span.token_end - span.token_start
+            scoring_length = span_length + len(query_ids)
+            if scoring_length > self.kv_cache_capacity:
+                raise ValueError(
+                    f"retrieval scoring length {scoring_length} exceeds "
+                    f"kv_cache_capacity={self.kv_cache_capacity}"
+                )
+            span_lengths.append((index, span_length))
+
+        packed_scoring = (
+            self.kv_retrieval.packed_scoring
+            and flash_attn_varlen_func is not None
+        )
+        if not packed_scoring:
+            scores = {
+                index: self._score_image_span_masked_self_information(
+                    prefix,
+                    index,
+                    query_ids,
+                    query_positions,
+                )
+                for index in candidates
+            }
+            return scores, len(candidates) * len(variants), False
+
+        batches = build_masked_scoring_batches(
+            span_lengths,
+            len(query_ids),
+            len(variants),
+            self.kv_retrieval.max_batch_tokens,
+        )
+        candidate_offsets = {
+            index: offset for offset, index in enumerate(candidates)
+        }
+        device = prefix.image_embeddings.device
+        total_nll = torch.zeros(
+            len(candidates),
+            dtype=torch.float32,
+            device=device,
+        )
+        scored_tokens = torch.zeros(
+            len(candidates),
+            dtype=torch.int64,
+            device=device,
+        )
+        for batch in batches:
+            logits, labels, target_ranges = (
+                self._forward_packed_masked_queries(
+                    prefix,
+                    batch,
+                    variants,
+                    query_positions,
+                )
+            )
+            token_nll = F.cross_entropy(
+                logits.float(),
+                labels,
+                reduction="none",
+            )
+            request_nll = torch.stack(
+                [
+                    token_nll[start:end].sum()
+                    for _, start, end in target_ranges
+                ]
+            )
+            owners = torch.tensor(
+                [
+                    candidate_offsets[span_index]
+                    for span_index, _, _ in target_ranges
+                ],
+                dtype=torch.long,
+                device=device,
+            )
+            request_counts = torch.tensor(
+                [
+                    end - start
+                    for _, start, end in target_ranges
+                ],
+                dtype=torch.int64,
+                device=device,
+            )
+            total_nll.index_add_(0, owners, request_nll)
+            scored_tokens.index_add_(0, owners, request_counts)
+
+        finite_counts = scored_tokens.clamp_min(1).to(dtype=torch.float32)
+        score_values = (-total_nll / finite_counts).tolist()
+        count_values = scored_tokens.tolist()
+        scores = {}
+        for offset, index in enumerate(candidates):
+            score = float(score_values[offset])
+            scores[index] = (
+                score
+                if count_values[offset] > 0 and math.isfinite(score)
+                else float("-inf")
+            )
+        return scores, len(batches), True
 
     def _score_image_span_causal_self_information(
         self,
@@ -1009,7 +1371,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         has_overview: bool,
         query_ids: Sequence[int],
         query_positions: Sequence[int],
-    ) -> tuple[list[int], dict[int, float], int]:
+    ) -> tuple[list[int], dict[int, float], int, int, bool]:
         """Apply the configured whole-image retrieval scoring ablation."""
 
         span_count = len(prefix.image_spans)
@@ -1025,18 +1387,28 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             else []
         )
         scores = [float("-inf")] * span_count
-        scorer = (
-            self._score_image_span_masked_self_information
-            if self.kv_retrieval.score_mode == "masked_self_information"
-            else self._score_image_span_causal_self_information
-        )
-        for index in candidates:
-            scores[index] = scorer(
-                prefix,
-                index,
-                query_ids,
-                query_positions,
+        score_batches = 0
+        packed_scoring = False
+        if self.kv_retrieval.score_mode == "masked_self_information":
+            masked_scores, score_batches, packed_scoring = (
+                self._score_image_spans_masked_self_information(
+                    prefix,
+                    candidates,
+                    query_ids,
+                    query_positions,
+                )
             )
+            for index, score in masked_scores.items():
+                scores[index] = score
+        else:
+            for index in candidates:
+                scores[index] = self._score_image_span_causal_self_information(
+                    prefix,
+                    index,
+                    query_ids,
+                    query_positions,
+                )
+            score_batches = len(candidates)
         selected = select_top_image_spans(
             scores,
             candidates,
@@ -1047,6 +1419,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             selected,
             {index: scores[index] for index in candidates},
             len(candidates),
+            score_batches,
+            packed_scoring,
         )
 
     def _forward_active(
@@ -1223,6 +1597,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         retrieved_indices = list(range(len(prefix.image_spans)))
         retrieval_scores: dict[int, float] = {}
         retrieval_candidates = len(prefix.image_spans)
+        retrieval_score_batches = 0
+        retrieval_packed_scoring = False
         retrieval_query_text: str | None = None
         retrieval_query_ids: list[int] = []
         if self.kv_retrieval.enabled:
@@ -1254,6 +1630,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                 retrieved_indices,
                 retrieval_scores,
                 retrieval_candidates,
+                retrieval_score_batches,
+                retrieval_packed_scoring,
             ) = self._select_retrieved_image_spans(
                 prefix,
                 has_overview=full_page_overview,
@@ -1570,6 +1948,17 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                         and self.kv_retrieval.score_mode
                         == "masked_self_information"
                     )
+                    else 0
+                ),
+                kv_cache_retrieval_packed_scoring=(
+                    retrieval_packed_scoring
+                ),
+                kv_cache_retrieval_score_batches=(
+                    retrieval_score_batches
+                ),
+                kv_cache_retrieval_max_batch_tokens=(
+                    self.kv_retrieval.max_batch_tokens
+                    if retrieval_packed_scoring
                     else 0
                 ),
                 kv_cache_retrieval_ratio=(

@@ -173,6 +173,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--kv-retrieval-packed-scoring",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "batch independent masked candidate/round documents with "
+            "FlashAttention varlen; disable for sequential equivalence tests"
+        ),
+    )
+    parser.add_argument(
+        "--kv-retrieval-max-batch-tokens",
+        type=int,
+        default=65_536,
+        help="soft token budget for each packed masked-scoring forward",
+    )
+    parser.add_argument(
         "--kv-retrieval-keep-overview",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -237,6 +252,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--kv-retrieval-topk-images must be non-negative")
     if args.kv_retrieval_mask_rounds <= 0:
         parser.error("--kv-retrieval-mask-rounds must be positive")
+    if args.kv_retrieval_max_batch_tokens <= 0:
+        parser.error("--kv-retrieval-max-batch-tokens must be positive")
     for name in (
         "block_add_threshold",
         "decoded_token_threshold",
@@ -528,6 +545,15 @@ def model_generate(
         "kv_cache_retrieval_mask_rounds": (
             output.kv_cache_retrieval_mask_rounds
         ),
+        "kv_cache_retrieval_packed_scoring": (
+            output.kv_cache_retrieval_packed_scoring
+        ),
+        "kv_cache_retrieval_score_batches": (
+            output.kv_cache_retrieval_score_batches
+        ),
+        "kv_cache_retrieval_max_batch_tokens": (
+            output.kv_cache_retrieval_max_batch_tokens
+        ),
         "kv_cache_retrieval_ratio": output.kv_cache_retrieval_ratio,
         "kv_cache_retrieval_seconds": output.kv_cache_retrieval_seconds,
         "vision_tiles": output.vision_tiles,
@@ -659,6 +685,15 @@ def infer_one(
         "kv_cache_retrieval_mask_rounds": result.get(
             "kv_cache_retrieval_mask_rounds"
         ),
+        "kv_cache_retrieval_packed_scoring": result.get(
+            "kv_cache_retrieval_packed_scoring"
+        ),
+        "kv_cache_retrieval_score_batches": result.get(
+            "kv_cache_retrieval_score_batches"
+        ),
+        "kv_cache_retrieval_max_batch_tokens": result.get(
+            "kv_cache_retrieval_max_batch_tokens"
+        ),
         "kv_cache_retrieval_ratio": result.get(
             "kv_cache_retrieval_ratio"
         ),
@@ -731,6 +766,9 @@ def error_record(sample, args, paired_sample_seed, exc: BaseException) -> dict[s
         "kv_cache_retrieval_query_tokens": None,
         "kv_cache_retrieval_score_mode": None,
         "kv_cache_retrieval_mask_rounds": None,
+        "kv_cache_retrieval_packed_scoring": None,
+        "kv_cache_retrieval_score_batches": None,
+        "kv_cache_retrieval_max_batch_tokens": None,
         "kv_cache_retrieval_ratio": None,
         "kv_cache_retrieval_seconds": None,
         "vision_tiles": None,
@@ -807,6 +845,12 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
             args.kv_retrieval_mask_rounds
             if args.kv_retrieval_score_mode == "masked_self_information"
             else 0
+        ),
+        "kv_retrieval_packed_scoring": (
+            args.kv_retrieval_packed_scoring
+        ),
+        "kv_retrieval_max_batch_tokens": (
+            args.kv_retrieval_max_batch_tokens
         ),
         "kv_retrieval_keep_overview": args.kv_retrieval_keep_overview,
         "kv_retrieval_query_source": "native_resize_prompt",
@@ -890,6 +934,8 @@ def main() -> None:
                 topk_images=args.kv_retrieval_topk_images,
                 score_mode=args.kv_retrieval_score_mode,
                 mask_rounds=args.kv_retrieval_mask_rounds,
+                packed_scoring=args.kv_retrieval_packed_scoring,
+                max_batch_tokens=args.kv_retrieval_max_batch_tokens,
                 keep_overview=args.kv_retrieval_keep_overview,
             ),
         )

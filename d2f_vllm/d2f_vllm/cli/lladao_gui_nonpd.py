@@ -115,6 +115,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--kv-retrieval-packed-scoring",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "batch independent masked candidate/round documents with "
+            "FlashAttention varlen; disable for sequential equivalence tests"
+        ),
+    )
+    parser.add_argument(
+        "--kv-retrieval-max-batch-tokens",
+        type=int,
+        default=65_536,
+        help="soft token budget for each packed masked-scoring forward",
+    )
+    parser.add_argument(
         "--kv-retrieval-keep-overview",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -142,6 +157,10 @@ def main() -> None:
         )
     if args.kv_retrieval_mask_rounds <= 0:
         raise SystemExit("--kv-retrieval-mask-rounds must be positive")
+    if args.kv_retrieval_max_batch_tokens <= 0:
+        raise SystemExit(
+            "--kv-retrieval-max-batch-tokens must be positive"
+        )
     if (
         args.max_model_len > args.original_max_position_embeddings
         and args.rope_scaling == "none"
@@ -198,6 +217,8 @@ def main() -> None:
             topk_images=args.kv_retrieval_topk_images,
             score_mode=args.kv_retrieval_score_mode,
             mask_rounds=args.kv_retrieval_mask_rounds,
+            packed_scoring=args.kv_retrieval_packed_scoring,
+            max_batch_tokens=args.kv_retrieval_max_batch_tokens,
             keep_overview=args.kv_retrieval_keep_overview,
         ),
     )

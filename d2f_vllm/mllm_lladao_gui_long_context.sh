@@ -25,7 +25,17 @@ KV_CACHE_RETRIEVAL="${KV_CACHE_RETRIEVAL:-0}"
 KV_RETRIEVAL_TOPK_IMAGES="${KV_RETRIEVAL_TOPK_IMAGES:-4}"
 KV_RETRIEVAL_SCORE_MODE="${KV_RETRIEVAL_SCORE_MODE:-masked_self_information}"
 KV_RETRIEVAL_MASK_ROUNDS="${KV_RETRIEVAL_MASK_ROUNDS:-2}"
+KV_RETRIEVAL_PACKED_SCORING="${KV_RETRIEVAL_PACKED_SCORING:-1}"
+KV_RETRIEVAL_MAX_BATCH_TOKENS="${KV_RETRIEVAL_MAX_BATCH_TOKENS:-65536}"
 KV_RETRIEVAL_KEEP_OVERVIEW="${KV_RETRIEVAL_KEEP_OVERVIEW:-1}"
+if [[ "$KV_RETRIEVAL_PACKED_SCORING" == "1" ]]; then
+  SCORING_BATCH_TAG="packed${KV_RETRIEVAL_MAX_BATCH_TOKENS}"
+elif [[ "$KV_RETRIEVAL_PACKED_SCORING" == "0" ]]; then
+  SCORING_BATCH_TAG="sequential"
+else
+  echo "KV_RETRIEVAL_PACKED_SCORING must be 0 or 1" >&2
+  exit 2
+fi
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   CACHE_TAG="kvcompress"
 elif [[ "$KV_CACHE_COMPRESSION" == "0" ]]; then
@@ -37,7 +47,7 @@ fi
 if [[ "$KV_CACHE_RETRIEVAL" == "1" ]]; then
   case "$KV_RETRIEVAL_SCORE_MODE" in
     masked_self_information)
-      RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}"
+      RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-${SCORING_BATCH_TAG}"
       ;;
     causal_self_information)
       RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causal"
@@ -70,6 +80,10 @@ if [[
 fi
 if ! [[ "$KV_RETRIEVAL_MASK_ROUNDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "KV_RETRIEVAL_MASK_ROUNDS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$KV_RETRIEVAL_MAX_BATCH_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "KV_RETRIEVAL_MAX_BATCH_TOKENS must be a positive integer" >&2
   exit 2
 fi
 if [[
@@ -206,11 +220,16 @@ if [[ "$KV_RETRIEVAL_KEEP_OVERVIEW" == "1" ]]; then
 else
   RETRIEVAL_OVERVIEW_FLAG="--no-kv-retrieval-keep-overview"
 fi
+if [[ "$KV_RETRIEVAL_PACKED_SCORING" == "1" ]]; then
+  RETRIEVAL_PACKED_FLAG="--kv-retrieval-packed-scoring"
+else
+  RETRIEVAL_PACKED_FLAG="--no-kv-retrieval-packed-scoring"
+fi
 
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_tile_size=$FULL_PAGE_TILE_SIZE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION kv_cache_retrieval=$KV_CACHE_RETRIEVAL kv_retrieval_topk_images=$KV_RETRIEVAL_TOPK_IMAGES kv_retrieval_score_mode=$KV_RETRIEVAL_SCORE_MODE kv_retrieval_mask_rounds=$KV_RETRIEVAL_MASK_ROUNDS kv_retrieval_keep_overview=$KV_RETRIEVAL_KEEP_OVERVIEW block_size=$BLOCK_SIZE limit=${LIMIT:-all}"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_tile_size=$FULL_PAGE_TILE_SIZE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION kv_cache_retrieval=$KV_CACHE_RETRIEVAL kv_retrieval_topk_images=$KV_RETRIEVAL_TOPK_IMAGES kv_retrieval_score_mode=$KV_RETRIEVAL_SCORE_MODE kv_retrieval_mask_rounds=$KV_RETRIEVAL_MASK_ROUNDS kv_retrieval_packed_scoring=$KV_RETRIEVAL_PACKED_SCORING kv_retrieval_max_batch_tokens=$KV_RETRIEVAL_MAX_BATCH_TOKENS kv_retrieval_keep_overview=$KV_RETRIEVAL_KEEP_OVERVIEW block_size=$BLOCK_SIZE limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -246,6 +265,8 @@ fi
   --kv-retrieval-topk-images "$KV_RETRIEVAL_TOPK_IMAGES" \
   --kv-retrieval-score-mode "$KV_RETRIEVAL_SCORE_MODE" \
   --kv-retrieval-mask-rounds "$KV_RETRIEVAL_MASK_ROUNDS" \
+  "$RETRIEVAL_PACKED_FLAG" \
+  --kv-retrieval-max-batch-tokens "$KV_RETRIEVAL_MAX_BATCH_TOKENS" \
   "$RETRIEVAL_OVERVIEW_FLAG" \
   --vision-tile-size 16 \
   --vision-topk-tiles 20 \
