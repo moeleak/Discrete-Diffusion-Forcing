@@ -15,6 +15,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 INPUT_MODE="${INPUT_MODE:-}"
 LIMIT="${LIMIT:-}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
+FULL_PAGE_TILE_SIZE="${FULL_PAGE_TILE_SIZE:-980}"
 FULL_PAGE_POSITION_MODE="${FULL_PAGE_POSITION_MODE:-sequential}"
 FULL_PAGE_OVERVIEW="${FULL_PAGE_OVERVIEW:-0}"
 FULL_PAGE_TRUNCATION="${FULL_PAGE_TRUNCATION:-0}"
@@ -161,6 +162,10 @@ if ! [[ "$BLOCK_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 64 % BLOCK_SIZE != 0 )); then
   echo "BLOCK_SIZE must be a positive divisor of 64" >&2
   exit 2
 fi
+if ! [[ "$FULL_PAGE_TILE_SIZE" =~ ^[1-9][0-9]*$ ]] || (( FULL_PAGE_TILE_SIZE > 980 )); then
+  echo "FULL_PAGE_TILE_SIZE must be an integer in [1, 980]" >&2
+  exit 2
+fi
 
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   COMPRESSION_FLAG="--kv-cache-compression"
@@ -181,7 +186,7 @@ fi
 {
   echo "[$(date '+%F %T')] mode=$MODE gpu=$GPU"
   echo "[$(date '+%F %T')] max_model_len=$MAX_MODEL_LEN kv_cache_capacity=$KV_CACHE_CAPACITY"
-  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION kv_cache_retrieval=$KV_CACHE_RETRIEVAL kv_retrieval_topk_images=$KV_RETRIEVAL_TOPK_IMAGES kv_retrieval_keep_overview=$KV_RETRIEVAL_KEEP_OVERVIEW block_size=$BLOCK_SIZE limit=${LIMIT:-all}"
+  echo "[$(date '+%F %T')] input_mode=$INPUT_MODE full_page_tile_size=$FULL_PAGE_TILE_SIZE full_page_position_mode=$FULL_PAGE_POSITION_MODE full_page_overview=$FULL_PAGE_OVERVIEW full_page_truncation=$FULL_PAGE_TRUNCATION allow_untruncated_original_full_page=$ALLOW_UNTRUNCATED_ORIGINAL_FULL_PAGE kv_cache_compression=$KV_CACHE_COMPRESSION kv_cache_retrieval=$KV_CACHE_RETRIEVAL kv_retrieval_topk_images=$KV_RETRIEVAL_TOPK_IMAGES kv_retrieval_keep_overview=$KV_RETRIEVAL_KEEP_OVERVIEW block_size=$BLOCK_SIZE limit=${LIMIT:-all}"
   echo "[$(date '+%F %T')] benchmark=$BENCHMARK_ROOT output=$OUTPUT_DIR"
 } | tee -a "$LOG"
 
@@ -205,7 +210,7 @@ fi
   --kv-cache-capacity "$KV_CACHE_CAPACITY" \
   --original-max-position-embeddings 16384 \
   "${FULL_PAGE_ARGS[@]}" \
-  --full-page-tile-size 980 \
+  --full-page-tile-size "$FULL_PAGE_TILE_SIZE" \
   --full-page-position-mode "$FULL_PAGE_POSITION_MODE" \
   "$OVERVIEW_FLAG" \
   "$TRUNCATION_FLAG" \

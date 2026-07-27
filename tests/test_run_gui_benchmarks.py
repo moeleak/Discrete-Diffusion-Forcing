@@ -172,7 +172,7 @@ def test_catalog_resolves_all_five_suites_without_duplicate_arms():
         "native16k-five-way",
         "yarn-isolation",
         "true-long-yarn",
-        "block-size-ablation",
+        "tile-size-ablation",
     ]
     assert len(selection.arms) == 14
     assert len(selection.arms) == len(set(selection.arms))
@@ -190,16 +190,20 @@ def test_single_benchmark_uses_its_default_dataset():
     )
 
 
-def test_block_size_ablation_changes_only_the_diffusion_block_size():
-    selection = MODULE.resolve_selection("block-size-ablation")
+def test_tile_size_ablation_changes_only_the_full_page_tile_size():
+    selection = MODULE.resolve_selection("tile-size-ablation")
     specs = [MODULE.BENCHMARKS[name] for name, _ in selection.arms]
 
-    assert [spec.block_size for spec in specs] == [16, 8, 4]
-    assert {spec.input_processing for spec in specs} == {
-        "checkpoint-native single-image resize"
-    }
-    assert {spec.rope for spec in specs} == {"none (checkpoint-native)"}
+    assert [spec.full_page_tile_size for spec in specs] == [980, 686, 490]
+    assert {spec.block_size for spec in specs} == {16}
+    assert {spec.rope for spec in specs} == {"YaRN factor 8"}
+    assert {spec.position_mode for spec in specs} == {"strided"}
+    assert {spec.overview for spec in specs} == {"yes"}
+    assert {spec.ocr for spec in specs} == {"prompt-only retrieval fusion"}
     assert {spec.kv_policy for spec in specs} == {"dense; compression off"}
+    assert {spec.environment for spec in specs} == {
+        MODULE.pairs(KV_CACHE_CAPACITY="65536")
+    }
 
 
 @pytest.mark.parametrize("limit", [0, 101])
@@ -253,6 +257,8 @@ def test_arm_record_uses_launcher_specific_output_variable(tmp_path):
     assert "OUTPUT_DIR" not in wrapped["environment"]
     assert direct["environment"]["GPU"] == "3"
     assert direct["environment"]["BLOCK_SIZE"] == "16"
+    assert "FULL_PAGE_TILE_SIZE" not in direct["environment"]
+    assert wrapped["environment"]["FULL_PAGE_TILE_SIZE"] == "980"
 
 
 def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
@@ -277,7 +283,7 @@ def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
         for suffix in ("md", "csv", "json"):
             assert (run_dir / "tables" / f"{name}.{suffix}").is_file()
     markdown = (run_dir / "tables" / "quality.md").read_text(encoding="utf-8")
-    assert "| yarn128k-ocr | 16 | long100 | 2 | 25.00 | 75.00 |" in markdown
+    assert "| yarn128k-ocr | 980 | 16 | long100 | 2 | 25.00 | 75.00 |" in markdown
 
 
 def test_report_rejects_prediction_order_changes(tmp_path):

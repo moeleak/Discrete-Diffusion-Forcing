@@ -271,9 +271,45 @@ def native_resize_prompt(sample: dict[str, Any]) -> str:
     return prompt[len(prefix) : -len(suffix)]
 
 
+def full_page_tile_count(sample: dict[str, Any], tile_size: int) -> int:
+    """Return the number of runtime full-page tiles for a prepared sample."""
+
+    width = sample.get("image_width")
+    height = sample.get("image_height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError("full-page input requires integer image dimensions")
+    if width <= 0 or height <= 0:
+        raise ValueError("full-page image dimensions must be positive")
+    if not 1 <= tile_size <= 980:
+        raise ValueError("full-page tile size must be in [1, 980]")
+    return math.ceil(width / tile_size) * math.ceil(height / tile_size)
+
+
+def full_page_grounding_prompt(
+    sample: dict[str, Any],
+    tile_size: int = 980,
+) -> str:
+    """Describe the exact runtime tiles rather than the prepared 980px layout."""
+
+    width = sample.get("image_width")
+    height = sample.get("image_height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError("full-page input requires integer image dimensions")
+    tile_count = full_page_tile_count(sample, tile_size)
+    instruction = native_resize_prompt(sample)
+    return (
+        f"The following {tile_count} images are non-overlapping tiles from one "
+        f"{width}x{height} webpage screenshot, ordered left-to-right and then "
+        "top-to-bottom. Treat them as one complete page. "
+        f"{instruction} Return the action and bounding box with coordinates "
+        "normalized to the complete original screenshot in [0,1000]."
+    )
+
+
 def resolve_sample_input(
     sample: dict[str, Any],
     full_page_override: bool | None,
+    full_page_tile_size: int = 980,
 ) -> tuple[bool, str, str]:
     """Resolve the actual image preprocessing and prompt used for inference."""
 
@@ -284,7 +320,12 @@ def resolve_sample_input(
         else full_page_override
     )
     if full_page:
-        return True, str(sample["prompt"]), "full_page_tiles"
+        prompt = (
+            full_page_grounding_prompt(sample, full_page_tile_size)
+            if prepared_full_page
+            else str(sample["prompt"])
+        )
+        return True, prompt, "full_page_tiles"
     prompt = (
         native_resize_prompt(sample)
         if prepared_full_page
@@ -293,24 +334,25 @@ def resolve_sample_input(
     return False, prompt, "native_resize"
 
 
-def overview_grounding_prompt(sample: dict[str, Any]) -> str:
+def overview_grounding_prompt(
+    sample: dict[str, Any],
+    tile_size: int = 980,
+) -> str:
     """Describe exact tiles plus the final whole-page overview without a crop."""
 
-    layout = sample.get("tile_layout")
     width = sample.get("image_width")
     height = sample.get("image_height")
     if (
-        not isinstance(layout, list)
-        or not layout
-        or not isinstance(width, int)
+        not isinstance(width, int)
         or not isinstance(height, int)
     ):
         raise ValueError(
-            "full-page overview requires tile_layout and integer image size"
+            "full-page overview requires integer image dimensions"
         )
+    tile_count = full_page_tile_count(sample, tile_size)
     instruction = native_resize_prompt(sample)
     return (
-        f"The first {len(layout)} images are exact non-overlapping tiles from "
+        f"The first {tile_count} images are exact non-overlapping tiles from "
         f"one {width}x{height} webpage screenshot, ordered left-to-right and "
         "then top-to-bottom. The final image is a resized overview of that "
         "same complete screenshot. Treat all images as one page and use the "
@@ -487,10 +529,12 @@ def infer_one(
     inference_seed = paired_sample_seed(sample, args.seed)
     set_seed(inference_seed)
     full_page, prompt, runtime_input_protocol = resolve_sample_input(
-        sample, args.full_page_tiles
+        sample,
+        args.full_page_tiles,
+        args.full_page_tile_size,
     )
     if full_page and args.full_page_overview:
-        prompt = overview_grounding_prompt(sample)
+        prompt = overview_grounding_prompt(sample, args.full_page_tile_size)
         runtime_input_protocol = "full_page_tiles_with_overview"
     elif full_page and args.truncate_full_page_tiles:
         runtime_input_protocol = "full_page_tiles_truncated"

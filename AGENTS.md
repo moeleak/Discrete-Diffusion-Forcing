@@ -10,6 +10,11 @@
   its advertised maximum position may differ.
 - Do not launch more than 100 benchmark samples unless the user explicitly
   authorizes the larger run.
+- A GUI tile-size ablation means the full-page screenshot tile edge
+  (`FULL_PAGE_TILE_SIZE`), not the D2F diffusion block size. Keep the model,
+  sample IDs, prompt instruction, overview/OCR policy, RoPE, D2F block size,
+  decoding, and KV policy fixed; use 14px-aligned tile sizes and regenerate
+  the prompt's runtime image count.
 - A causal true-long YaRN comparison must use the same full-page tiles,
   sequential positions above 16K, 128K model limit, 65,536-token resident KV
   capacity, seed, prompt, and decoding parameters in both arms. Compare

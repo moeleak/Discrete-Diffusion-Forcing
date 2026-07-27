@@ -52,6 +52,7 @@ class BenchmarkSpec:
     kv_policy: str
     retrieval_query: str
     block_size: int = 16
+    full_page_tile_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="dense; compression off",
         retrieval_query="visible operation instruction",
+        full_page_tile_size=980,
     ),
     "yarn128k-kv-top4-ocr": BenchmarkSpec(
         name="yarn128k-kv-top4-ocr",
@@ -149,6 +151,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="whole-image Top-4 retrieval; compression off",
         retrieval_query="visible operation instruction only",
+        full_page_tile_size=980,
     ),
     "unscaled128k-ocr": BenchmarkSpec(
         name="unscaled128k-ocr",
@@ -169,6 +172,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="dense; compression off",
         retrieval_query="visible operation instruction",
+        full_page_tile_size=980,
     ),
     "yarn128k-fullres-ocr": BenchmarkSpec(
         name="yarn128k-fullres-ocr",
@@ -189,6 +193,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="dense; compression off",
         retrieval_query="visible operation instruction",
+        full_page_tile_size=980,
     ),
     "native16k-fullres-ocr": BenchmarkSpec(
         name="native16k-fullres-ocr",
@@ -209,6 +214,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="dense; compression off",
         retrieval_query="visible operation instruction",
+        full_page_tile_size=980,
     ),
     "native16k-truncated-ocr": BenchmarkSpec(
         name="native16k-truncated-ocr",
@@ -229,6 +235,7 @@ BENCHMARKS = {
         ocr="prompt-only retrieval fusion",
         kv_policy="dense; compression off",
         retrieval_query="visible operation instruction",
+        full_page_tile_size=980,
     ),
     "original16k-native": BenchmarkSpec(
         name="original16k-native",
@@ -309,6 +316,7 @@ BENCHMARKS = {
         ocr="no",
         kv_policy="dense 65,536 resident; compression off",
         retrieval_query="none",
+        full_page_tile_size=980,
     ),
     "yarn128k-sequential": BenchmarkSpec(
         name="yarn128k-sequential",
@@ -338,26 +346,23 @@ BENCHMARKS = {
         ocr="no",
         kv_policy="dense 65,536 resident; compression off",
         retrieval_query="none",
+        full_page_tile_size=980,
     ),
 }
 
-for block_size in (8, 4):
-    name = f"original16k-native-block{block_size}"
+for tile_size in (686, 490):
+    name = f"yarn128k-ocr-tile{tile_size}"
     BENCHMARKS[name] = replace(
-        BENCHMARKS["original16k-native"],
+        BENCHMARKS["yarn128k-ocr"],
         name=name,
         description=(
-            "Controlled checkpoint-native resized-image arm with "
-            f"diffusion block size {block_size}"
+            "YaRN 128K with all source tiles, overview, OCR, and "
+            f"{tile_size}px full-page tiles"
         ),
-        environment=pairs(
-            MODE="original",
-            INPUT_MODE="native_resize",
-            KV_CACHE_CAPACITY="16384",
-            KV_CACHE_COMPRESSION="0",
-            BLOCK_SIZE=str(block_size),
+        input_processing=(
+            f"all exact {tile_size}px tiles + whole-page overview"
         ),
-        block_size=block_size,
+        full_page_tile_size=tile_size,
     )
 
 
@@ -398,13 +403,13 @@ SUITES = {
             ("yarn128k-sequential", "long100"),
         ),
     ),
-    "block-size-ablation": SuiteSpec(
-        name="block-size-ablation",
-        description="Native-resize D2F decoding with block sizes 16, 8, and 4",
+    "tile-size-ablation": SuiteSpec(
+        name="tile-size-ablation",
+        description="Full-page image tiles of 980px, 686px, and 490px",
         arms=(
-            ("original16k-native", "long100"),
-            ("original16k-native-block8", "long100"),
-            ("original16k-native-block4", "long100"),
+            ("yarn128k-ocr", "long100"),
+            ("yarn128k-ocr-tile686", "long100"),
+            ("yarn128k-ocr-tile490", "long100"),
         ),
     ),
 }
@@ -629,6 +634,7 @@ def extract_arm_rows(
     protocol = arm["protocol"]
     quality = {
         "Configuration": arm["benchmark"],
+        "Tile size (px)": protocol["full_page_tile_size"],
         "Block size": protocol["block_size"],
         "Dataset": arm["dataset"],
         "Samples": final_metrics.get("num_samples"),
@@ -641,6 +647,7 @@ def extract_arm_rows(
     }
     performance = {
         "Configuration": arm["benchmark"],
+        "Tile size (px)": protocol["full_page_tile_size"],
         "Block size": protocol["block_size"],
         "Dataset": arm["dataset"],
         "Mean convergence steps": summary_value(
@@ -659,9 +666,11 @@ def extract_arm_rows(
         "Mean tokens/s": summary_value(runtime, "total_tokens_per_second", "mean"),
         "Mean resident KV": resident,
         "Mean dense prefix": dense,
+        "Max dense prefix": summary_value(runtime, "dense_prefix_tokens", "max"),
         "KV reduction (%)": reduction,
         "Max actual RoPE": max(rope_candidates) if rope_candidates else None,
         "Mean input images": summary_value(runtime, "input_images", "mean"),
+        "Max input images": summary_value(runtime, "input_images", "max"),
         "Peak allocated (GiB)": summary_value(
             runtime, "peak_memory_allocated_gib", "max"
         ),
@@ -682,6 +691,7 @@ def extract_arm_rows(
             else "unknown"
         ),
         "Input processing": protocol["input_processing"],
+        "Tile size (px)": protocol["full_page_tile_size"],
         "Block size": protocol["block_size"],
         "RoPE": protocol["rope"],
         "Max context": protocol["max_context"],
@@ -890,6 +900,7 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         "kv_policy": spec.kv_policy,
         "retrieval_query": spec.retrieval_query,
         "block_size": spec.block_size,
+        "full_page_tile_size": spec.full_page_tile_size,
     }
 
 
@@ -927,6 +938,8 @@ def build_arm_record(
         "MODEL_LOG": str(log_dir / f"{identifier}.model.log"),
         "OCR_LOG": str(log_dir / f"{identifier}.ocr.log"),
     }
+    if spec.full_page_tile_size is not None:
+        environment["FULL_PAGE_TILE_SIZE"] = str(spec.full_page_tile_size)
     environment.update(dict(spec.environment))
     saved_fingerprint = {
         key: value for key, value in fingerprint.items() if key != "sample_ids"
