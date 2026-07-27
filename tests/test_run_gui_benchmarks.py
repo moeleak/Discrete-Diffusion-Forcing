@@ -83,6 +83,7 @@ def write_scores(
                         "joint_step_success": ssr,
                         "action_f1_macro_present": 1.0,
                         "parse_rate": 1.0,
+                        "convergence_steps": summary(14.0),
                     }
                 },
                 "runtime": {
@@ -162,7 +163,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_four_suites_without_duplicate_arms():
+def test_catalog_resolves_all_five_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -170,8 +171,9 @@ def test_catalog_resolves_all_four_suites_without_duplicate_arms():
         "native16k-five-way",
         "yarn-isolation",
         "true-long-yarn",
+        "block-size-ablation",
     ]
-    assert len(selection.arms) == 12
+    assert len(selection.arms) == 14
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -185,6 +187,18 @@ def test_single_benchmark_uses_its_default_dataset():
             (("yarn128k-kv-top4-ocr", "long100"),),
         ),
     )
+
+
+def test_block_size_ablation_changes_only_the_diffusion_block_size():
+    selection = MODULE.resolve_selection("block-size-ablation")
+    specs = [MODULE.BENCHMARKS[name] for name, _ in selection.arms]
+
+    assert [spec.block_size for spec in specs] == [16, 8, 4]
+    assert {spec.input_processing for spec in specs} == {
+        "checkpoint-native single-image resize"
+    }
+    assert {spec.rope for spec in specs} == {"none (checkpoint-native)"}
+    assert {spec.kv_policy for spec in specs} == {"dense; compression off"}
 
 
 @pytest.mark.parametrize("limit", [0, 101])
@@ -237,6 +251,7 @@ def test_arm_record_uses_launcher_specific_output_variable(tmp_path):
     assert wrapped["environment"]["RESULT_ROOT"] == str(tmp_path / "result")
     assert "OUTPUT_DIR" not in wrapped["environment"]
     assert direct["environment"]["GPU"] == "3"
+    assert direct["environment"]["BLOCK_SIZE"] == "16"
 
 
 def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
@@ -252,13 +267,14 @@ def test_report_writes_quality_performance_and_protocol_tables(tmp_path):
     assert quality["Final stage"] == "OCR/fused"
     assert performance["KV reduction (%)"] == 25.0
     assert performance["Max actual RoPE"] == 111.0
+    assert performance["Mean convergence steps"] == 14.0
     assert len(protocol["Manifest SHA-256"]) == 64
     assert protocol["Worktree"] == "clean"
     for name in ("quality", "performance", "protocol"):
         for suffix in ("md", "csv", "json"):
             assert (run_dir / "tables" / f"{name}.{suffix}").is_file()
     markdown = (run_dir / "tables" / "quality.md").read_text(encoding="utf-8")
-    assert "| yarn128k-ocr | long100 | 2 | 25.00 | 75.00 |" in markdown
+    assert "| yarn128k-ocr | 16 | long100 | 2 | 25.00 | 75.00 |" in markdown
 
 
 def test_report_rejects_prediction_order_changes(tmp_path):

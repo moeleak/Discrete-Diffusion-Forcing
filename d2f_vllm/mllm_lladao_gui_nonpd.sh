@@ -11,6 +11,7 @@ BENCHMARK_ROOT="${BENCHMARK_ROOT:-$ROOT/data/bench_ocr}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/results/d2f-vllm-nonpd-100}"
 LIMIT="${LIMIT:-100}"
 GPU="${GPU:-0}"
+BLOCK_SIZE="${BLOCK_SIZE:-16}"
 MASTER_PORT="${MASTER_PORT:-32333}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LOG="${LOG:-$ROOT/logs/d2f-vllm-nonpd-${RUN_ID}.log}"
@@ -30,13 +31,18 @@ export D2F_VLLM_RMS_NORM_BACKEND="${D2F_VLLM_RMS_NORM_BACKEND:-vllm}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 
+if ! [[ "$BLOCK_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 64 % BLOCK_SIZE != 0 )); then
+  echo "BLOCK_SIZE must be a positive divisor of 64" >&2
+  exit 2
+fi
+
 if [[ "$KV_CACHE_COMPRESSION" == "1" ]]; then
   COMPRESSION_FLAG="--kv-cache-compression"
 else
   COMPRESSION_FLAG="--no-kv-cache-compression"
 fi
 
-echo "[$(date '+%F %T')] LLaDA-o GUI Non-PD: gpu=$GPU limit=$LIMIT model=$RUNTIME_MODEL" | tee -a "$LOG"
+echo "[$(date '+%F %T')] LLaDA-o GUI Non-PD: gpu=$GPU limit=$LIMIT block_size=$BLOCK_SIZE model=$RUNTIME_MODEL" | tee -a "$LOG"
 echo "[$(date '+%F %T')] KV compression: enabled=$KV_CACHE_COMPRESSION tile=$VISION_TILE_SIZE topk=$VISION_TOPK_TILES keep=$VISION_TOKEN_KEEP_RATIO query_window=$VISION_SCORE_QUERY_WINDOW layers=$VISION_SCORE_LAYER_MODE:$VISION_SCORE_LAYERS pool=$VISION_SCORE_POOL_KERNEL" | tee -a "$LOG"
 "$PYTHON" "$REPO/D2F-eval/eval_lladao_gui.py" \
   --backend d2f_vllm \
@@ -50,7 +56,7 @@ echo "[$(date '+%F %T')] KV compression: enabled=$KV_CACHE_COMPRESSION tile=$VIS
   --limit "$LIMIT" \
   --warmup 1 \
   --max-new-tokens 64 \
-  --block-size 16 \
+  --block-size "$BLOCK_SIZE" \
   --block-add-threshold 0.1 \
   --decoded-token-threshold 0.95 \
   --skip-threshold 0.9 \

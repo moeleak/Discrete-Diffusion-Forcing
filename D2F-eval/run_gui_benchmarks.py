@@ -14,7 +14,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,7 @@ class BenchmarkSpec:
     ocr: str
     kv_policy: str
     retrieval_query: str
+    block_size: int = 16
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,25 @@ BENCHMARKS = {
     ),
 }
 
+for block_size in (8, 4):
+    name = f"original16k-native-block{block_size}"
+    BENCHMARKS[name] = replace(
+        BENCHMARKS["original16k-native"],
+        name=name,
+        description=(
+            "Controlled checkpoint-native resized-image arm with "
+            f"diffusion block size {block_size}"
+        ),
+        environment=pairs(
+            MODE="original",
+            INPUT_MODE="native_resize",
+            KV_CACHE_CAPACITY="16384",
+            KV_CACHE_COMPRESSION="0",
+            BLOCK_SIZE=str(block_size),
+        ),
+        block_size=block_size,
+    )
+
 
 SUITES = {
     "deployment": SuiteSpec(
@@ -376,6 +396,15 @@ SUITES = {
         arms=(
             ("unscaled128k-sequential", "long100"),
             ("yarn128k-sequential", "long100"),
+        ),
+    ),
+    "block-size-ablation": SuiteSpec(
+        name="block-size-ablation",
+        description="Native-resize D2F decoding with block sizes 16, 8, and 4",
+        arms=(
+            ("original16k-native", "long100"),
+            ("original16k-native-block8", "long100"),
+            ("original16k-native-block4", "long100"),
         ),
     ),
 }
@@ -597,8 +626,10 @@ def extract_arm_rows(
         for value in (max_prefill, max_generation)
         if isinstance(value, (int, float))
     ]
+    protocol = arm["protocol"]
     quality = {
         "Configuration": arm["benchmark"],
+        "Block size": protocol["block_size"],
         "Dataset": arm["dataset"],
         "Samples": final_metrics.get("num_samples"),
         "Raw SSR (%)": pct(raw_metrics.get("ssr_point_only")),
@@ -610,7 +641,11 @@ def extract_arm_rows(
     }
     performance = {
         "Configuration": arm["benchmark"],
+        "Block size": protocol["block_size"],
         "Dataset": arm["dataset"],
+        "Mean convergence steps": summary_value(
+            raw_metrics, "convergence_steps", "mean"
+        ),
         "Mean latency (s)": summary_value(runtime, "model_elapsed_seconds", "mean"),
         "P95 latency (s)": summary_value(runtime, "model_elapsed_seconds", "p95"),
         "Mean tokens/s": summary_value(runtime, "total_tokens_per_second", "mean"),
@@ -624,7 +659,6 @@ def extract_arm_rows(
         ),
         "Errors": runtime.get("errors"),
     }
-    protocol = arm["protocol"]
     configuration = {
         "Configuration": arm["benchmark"],
         "Dataset": arm["dataset"],
@@ -640,6 +674,7 @@ def extract_arm_rows(
             else "unknown"
         ),
         "Input processing": protocol["input_processing"],
+        "Block size": protocol["block_size"],
         "RoPE": protocol["rope"],
         "Max context": protocol["max_context"],
         "Position mode": protocol["position_mode"],
@@ -846,6 +881,7 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         "ocr": spec.ocr,
         "kv_policy": spec.kv_policy,
         "retrieval_query": spec.retrieval_query,
+        "block_size": spec.block_size,
     }
 
 
@@ -875,6 +911,7 @@ def build_arm_record(
         "BENCHMARK_ROOT": str(benchmark_root),
         "LIMIT": str(limit),
         "GPU": gpu,
+        "BLOCK_SIZE": str(spec.block_size),
         "RUN_ID": run_id,
         "REVISION": revision,
         spec.output_variable: str(result_dir),
@@ -1166,7 +1203,7 @@ def print_catalog(as_json: bool) -> None:
             }
             for name, suite in SUITES.items()
         },
-        "special": {"all": "run all four suites, deduplicating identical arms"},
+        "special": {"all": "run all five suites, deduplicating identical arms"},
     }
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
@@ -1179,7 +1216,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all four suites")
+    print("\n  all                            run all five suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

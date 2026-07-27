@@ -106,7 +106,7 @@ python D2F-eval/run_gui_benchmarks.py run yarn128k-ocr \
 python D2F-eval/run_gui_benchmarks.py run deployment \
   --gpu 0 --limit 100
 
-# Run all four comparison suites. Identical arms within this invocation are
+# Run all five comparison suites. Identical arms within this invocation are
 # executed once, but a later invocation always creates a fresh run.
 python D2F-eval/run_gui_benchmarks.py run all \
   --gpu 0 --limit 100
@@ -120,6 +120,7 @@ The predefined suites are:
 | `native16k-five-way` | the five full-page configurations documented below | fixed native-16K seed42 set |
 | `yarn-isolation` | original 16K versus YaRN on native-resized input | identical ordered long-page IDs |
 | `true-long-yarn` | unscaled 128K versus YaRN with sequential positions | identical ordered long-page IDs |
+| `block-size-ablation` | block sizes 16, 8, and 4 with every other inference setting fixed | identical ordered long-page IDs |
 
 All suite arms run serially on the selected GPU so latency and peak-memory
 measurements are not polluted by a competing arm. `--limit` is restricted to
@@ -145,12 +146,13 @@ tables/protocol.{md,csv,json}
 ```
 
 The quality table reports raw/final SSR, joint SSR, action F1, and parse rate.
-The performance table reports latency, throughput, resident/dense KV, actual
-maximum RoPE position, peak memory, and errors. The protocol table freezes the
-input mode, RoPE/KV/OCR settings, Git revision, manifest hash, and ordered
-sample-ID SHA-256. It also labels the runtime checkout as `clean` or `dirty`
-so a revision is never mistaken for an exact clean checkout. A comparison
-table is rejected if its arms do not have the same sample fingerprint.
+The performance table reports block size, convergence steps, latency,
+throughput, resident/dense KV, actual maximum RoPE position, peak memory, and
+errors. The protocol table freezes the input mode, RoPE/KV/OCR settings, Git
+revision, manifest hash, and ordered sample-ID SHA-256. It also labels the
+runtime checkout as `clean` or `dirty` so a revision is never mistaken for an
+exact clean checkout. A comparison table is rejected if its arms do not have
+the same sample fingerprint.
 Regenerate and revalidate the tables of an existing unified run without
 performing inference with:
 
@@ -158,6 +160,19 @@ performing inference with:
 python D2F-eval/run_gui_benchmarks.py report \
   /home/ma-user/work/LLaDA-o/results/gui-benchmarks/<run-id>
 ```
+
+Run the controlled block-size ablation with:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py run block-size-ablation \
+  --gpu 0 --limit 100
+```
+
+All three arms use the same ordered samples, checkpoint-native image resize,
+native RoPE positions, 64 generated tokens, decoding thresholds, prompt,
+seed, dense 16K-resident KV, and no OCR or KV compression. Only the diffusion
+block size changes from 16 to 8 to 4. These are inference-time settings and do
+not require retraining.
 
 The native GUI Non-PD path supports a reproducible 128K YaRN configuration
 without forcing the KV cache to reserve the full positional limit:
