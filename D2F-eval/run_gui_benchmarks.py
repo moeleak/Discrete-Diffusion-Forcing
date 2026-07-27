@@ -1408,7 +1408,7 @@ def print_catalog(as_json: bool) -> None:
             }
             for name, suite in SUITES.items()
         },
-        "special": {"all": "run all five suites, deduplicating identical arms"},
+        "special": {"all": "run all six suites, deduplicating identical arms"},
     }
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
@@ -1421,7 +1421,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all five suites")
+    print("\n  all                            run all six suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
