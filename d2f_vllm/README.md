@@ -87,6 +87,76 @@ In contrast, setting `add_new_block_threshold=1.0` allows compatibility with Fas
 
 ## LLaDA-o GUI long-context benchmark
 
+### Unified benchmark runner
+
+Use the unified runner instead of invoking the individual launchers when a
+machine-readable run manifest and all result tables are required:
+
+```bash
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+
+# Show every benchmark and suite.
+python D2F-eval/run_gui_benchmarks.py list
+
+# Run one configuration from scratch on GPU 0.
+python D2F-eval/run_gui_benchmarks.py run yarn128k-ocr \
+  --gpu 0 --limit 100
+
+# Run one comparison suite serially on a single GPU.
+python D2F-eval/run_gui_benchmarks.py run deployment \
+  --gpu 0 --limit 100
+
+# Run all four comparison suites. Identical arms within this invocation are
+# executed once, but a later invocation always creates a fresh run.
+python D2F-eval/run_gui_benchmarks.py run all \
+  --gpu 0 --limit 100
+```
+
+The predefined suites are:
+
+| Suite | Arms | Default sample set |
+|---|---|---|
+| `deployment` | native OCR crop, YaRN 128K + OCR, unscaled 128K + OCR | ordered long-page 16K–64K set |
+| `native16k-five-way` | the five full-page configurations documented below | fixed native-16K seed42 set |
+| `yarn-isolation` | original 16K versus YaRN on native-resized input | identical ordered long-page IDs |
+| `true-long-yarn` | unscaled 128K versus YaRN with sequential positions | identical ordered long-page IDs |
+
+All suite arms run serially on the selected GPU so latency and peak-memory
+measurements are not polluted by a competing arm. `--limit` is restricted to
+1–100 by repository policy. Use `--benchmark-root` to override the dataset for
+a single benchmark or single-dataset suite, and use `--dry-run` to validate
+the paths, sample fingerprint, and resolved commands without starting
+inference:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py run native16k-five-way \
+  --gpu 0 --limit 100 --dry-run
+```
+
+Every real invocation creates a new directory below
+`$ROOT/results/gui-benchmarks/<run-id>` and refuses to reuse it. The directory
+contains `run.json`, one log and result directory per arm, and three reports
+in Markdown, CSV, and JSON:
+
+```text
+tables/quality.{md,csv,json}
+tables/performance.{md,csv,json}
+tables/protocol.{md,csv,json}
+```
+
+The quality table reports raw/final SSR, joint SSR, action F1, and parse rate.
+The performance table reports latency, throughput, resident/dense KV, actual
+maximum RoPE position, peak memory, and errors. The protocol table freezes the
+input mode, RoPE/KV/OCR settings, Git revision, manifest hash, and ordered
+sample-ID SHA-256. A comparison table is rejected if its arms do not have the
+same sample fingerprint. Regenerate and revalidate the tables of an existing
+unified run without performing inference with:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py report \
+  /home/ma-user/work/LLaDA-o/results/gui-benchmarks/<run-id>
+```
+
 The native GUI Non-PD path supports a reproducible 128K YaRN configuration
 without forcing the KV cache to reserve the full positional limit:
 
