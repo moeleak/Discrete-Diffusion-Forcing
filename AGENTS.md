@@ -20,3 +20,11 @@
   capacity, seed, prompt, and decoding parameters in both arms. Compare
   unscaled 128K against YaRN 128K; do not present native-resized original 16K
   versus full-page YaRN as a controlled YaRN experiment.
+- A KV-retrieval scoring ablation must use the fixed first 100 ordered
+  long-page sample IDs and keep the image tiles, overview, operation-only
+  query, Top-K, checkpoint, YaRN/position policy, prompt, seed, decoding, OCR,
+  and disabled token/head KV compression identical. Run dense/no retrieval,
+  legacy causal next-token scoring, and bidirectional masked scoring serially
+  on one GPU. The legacy causal scorer is ablation-only; the default runtime
+  remains bidirectional masked scoring. Audit target-tile recall only after
+  inference from ground-truth boxes.

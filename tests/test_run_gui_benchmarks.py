@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_five_suites_without_duplicate_arms():
+def test_catalog_resolves_all_six_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -173,8 +173,9 @@ def test_catalog_resolves_all_five_suites_without_duplicate_arms():
         "yarn-isolation",
         "true-long-yarn",
         "tile-size-ablation",
+        "kv-retrieval-scoring-ablation",
     ]
-    assert len(selection.arms) == 14
+    assert len(selection.arms) == 16
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -204,6 +205,72 @@ def test_tile_size_ablation_changes_only_the_full_page_tile_size():
     assert {spec.environment for spec in specs} == {
         MODULE.pairs(KV_CACHE_CAPACITY="65536")
     }
+
+
+def test_kv_retrieval_scoring_ablation_changes_only_the_scorer():
+    selection = MODULE.resolve_selection("kv-retrieval-scoring-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-ocr", "long100"),
+        ("yarn128k-kv-top4-causal-ocr", "long100"),
+        ("yarn128k-kv-top4-ocr", "long100"),
+    )
+    causal = MODULE.BENCHMARKS["yarn128k-kv-top4-causal-ocr"]
+    masked = MODULE.BENCHMARKS["yarn128k-kv-top4-ocr"]
+    assert causal.launcher == masked.launcher
+    assert causal.dataset == masked.dataset
+    assert causal.input_processing == masked.input_processing
+    assert causal.rope == masked.rope
+    assert causal.max_context == masked.max_context
+    assert causal.position_mode == masked.position_mode
+    assert causal.crop == masked.crop
+    assert causal.overview == masked.overview
+    assert causal.truncation == masked.truncation
+    assert causal.ocr == masked.ocr
+    causal_environment = dict(causal.environment)
+    masked_environment = dict(masked.environment)
+    assert causal_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "causal_self_information"
+    )
+    assert masked_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "masked_self_information"
+    )
+    assert causal_environment == masked_environment
+
+
+def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(
+    tmp_path,
+):
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-a",
+                "provenance": {
+                    "source_bbox_xyxy": [120, 10, 180, 50],
+                },
+                "tile_layout": [
+                    {"index": 0, "box_xyxy": [0, 0, 100, 100]},
+                    {"index": 1, "box_xyxy": [100, 0, 200, 100]},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    predictions = [
+        {
+            "sample_id": "sample-a",
+            "kv_cache_retrieval_enabled": True,
+            "kv_cache_retrieval_indices": [1, 2],
+        }
+    ]
+
+    assert MODULE.retrieval_target_tile_recall(
+        predictions,
+        records,
+        ["sample-a"],
+    ) == 100.0
 
 
 @pytest.mark.parametrize("limit", [0, 101])

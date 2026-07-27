@@ -106,7 +106,7 @@ python D2F-eval/run_gui_benchmarks.py run yarn128k-ocr \
 python D2F-eval/run_gui_benchmarks.py run deployment \
   --gpu 0 --limit 100
 
-# Run all five comparison suites. Identical arms within this invocation are
+# Run all six comparison suites. Identical arms within this invocation are
 # executed once, but a later invocation always creates a fresh run.
 python D2F-eval/run_gui_benchmarks.py run all \
   --gpu 0 --limit 100
@@ -121,6 +121,7 @@ The predefined suites are:
 | `yarn-isolation` | original 16K versus YaRN on native-resized input | identical ordered long-page IDs |
 | `true-long-yarn` | unscaled 128K versus YaRN with sequential positions | identical ordered long-page IDs |
 | `tile-size-ablation` | full-page image tiles of 980px, 686px, and 490px with every other setting fixed | identical ordered long-page IDs |
+| `kv-retrieval-scoring-ablation` | dense context, legacy causal Top-4 retrieval, and bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
 
 All suite arms run serially on the selected GPU so latency and peak-memory
 measurements are not polluted by a competing arm. `--limit` is restricted to
@@ -145,11 +146,13 @@ tables/performance.{md,csv,json}
 tables/protocol.{md,csv,json}
 ```
 
-The quality table reports raw/final SSR, joint SSR, action F1, and parse rate.
+The quality table reports raw/final SSR, joint SSR, action F1, parse rate,
+and post-hoc target-tile recall for retrieval arms.
 The performance table reports full-page tile size, the fixed D2F block size,
 convergence steps, synchronized end-to-end latency, model-only latency,
-throughput, resident/dense KV, input-image count, actual maximum RoPE position,
-peak memory, and errors. The protocol table freezes the input mode,
+retrieval latency, throughput, resident/dense KV, selected-image count,
+input-image count, actual maximum RoPE position, peak memory, and errors. The
+protocol table freezes the input mode,
 RoPE/KV/OCR settings, Git revision, manifest hash, and ordered sample-ID
 SHA-256. It also labels the runtime checkout as `clean` or `dirty` so a
 revision is never mistaken for an exact clean checkout. A comparison table is
@@ -197,6 +200,23 @@ Because every source pixel remains present, smaller tiles do not materially
 reduce dense KV tokens or peak memory; they mainly add image-boundary and
 scheduling overhead. All three fused arms have 100% action F1 and parse rate.
 Keep 980px as the default for this configuration.
+
+Run the controlled KV-retrieval scorer ablation with:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-scoring-ablation --gpu 0 --limit 100
+```
+
+The three arms are executed serially on one GPU and share the same first 100
+ordered long-page samples, exact 980px tiles, whole-page overview, operation
+instruction query, checkpoint, YaRN factor 8, strided positions, 128K model
+limit, 65,536-token resident capacity, D2F decoding parameters, and
+prompt-only OCR fusion. Token/head KV compression is disabled. The two
+retrieval arms differ only in `KV_RETRIEVAL_SCORE_MODE`: the legacy arm uses
+clear-query causal next-token likelihood, while the default arm uses two
+complementary masked queries with full bidirectional attention. Ground-truth
+boxes are read only by the report step for target-tile recall.
 
 The complete Markdown, CSV, JSON, logs, manifests, and per-sample predictions
 are under:
@@ -401,6 +421,13 @@ runtime retains the top four complete image spans and force-keeps the resized
 whole-page overview. Selection never drops individual patch tokens, layers,
 or KV heads, so this mode is mutually exclusive with
 `KV_CACHE_COMPRESSION=1`.
+
+For controlled regression experiments only,
+`KV_RETRIEVAL_SCORE_MODE=causal_self_information` restores the retired
+clear-query causal next-token proxy. It is not the default and should not be
+used as the dLLM retrieval implementation. Use the unified
+`kv-retrieval-scoring-ablation` suite so both scoring arms receive identical
+runtime inputs.
 
 The model input and two-round scoring input are conceptually:
 

@@ -8,14 +8,27 @@ LIMIT="${LIMIT:-100}"
 GPU="${GPU:-0}"
 KV_CACHE_CAPACITY="${KV_CACHE_CAPACITY:-65536}"
 KV_RETRIEVAL_TOPK_IMAGES="${KV_RETRIEVAL_TOPK_IMAGES:-4}"
+KV_RETRIEVAL_SCORE_MODE="${KV_RETRIEVAL_SCORE_MODE:-masked_self_information}"
 KV_RETRIEVAL_MASK_ROUNDS="${KV_RETRIEVAL_MASK_ROUNDS:-2}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 REVISION="${REVISION:-$(git -C "$REPO" rev-parse --short HEAD)}"
-RESULT_ROOT="${RESULT_ROOT:-$ROOT/results/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}}"
+case "$KV_RETRIEVAL_SCORE_MODE" in
+  masked_self_information)
+    RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}"
+    ;;
+  causal_self_information)
+    RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causal"
+    ;;
+  *)
+    echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information or causal_self_information" >&2
+    exit 2
+    ;;
+esac
+RESULT_ROOT="${RESULT_ROOT:-$ROOT/results/d2f-vllm-yarn128k-uncropped-${RETRIEVAL_TAG}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}}"
 MODEL_OUTPUT="${MODEL_OUTPUT:-$RESULT_ROOT/model}"
 FUSED_OUTPUT="${FUSED_OUTPUT:-$RESULT_ROOT/fused}"
-MODEL_LOG="${MODEL_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-model-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
-OCR_LOG="${OCR_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
+MODEL_LOG="${MODEL_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-${RETRIEVAL_TAG}-model-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
+OCR_LOG="${OCR_LOG:-$ROOT/logs/d2f-vllm-yarn128k-uncropped-${RETRIEVAL_TAG}-ocr-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
 
 if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || (( LIMIT > 100 )); then
   echo "uncropped YaRN KV-retrieval OCR LIMIT must be in [1, 100]" >&2
@@ -40,6 +53,7 @@ FULL_PAGE_TRUNCATION=0 \
 KV_CACHE_COMPRESSION=0 \
 KV_CACHE_RETRIEVAL=1 \
 KV_RETRIEVAL_TOPK_IMAGES="$KV_RETRIEVAL_TOPK_IMAGES" \
+KV_RETRIEVAL_SCORE_MODE="$KV_RETRIEVAL_SCORE_MODE" \
 KV_RETRIEVAL_MASK_ROUNDS="$KV_RETRIEVAL_MASK_ROUNDS" \
 KV_RETRIEVAL_KEEP_OVERVIEW=1 \
 MAX_MODEL_LEN=131072 \

@@ -21,7 +21,7 @@ from typing import Any
 
 BENCHMARK = "mind2web_fullpage"
 MAX_SAMPLES = 100
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -142,6 +142,7 @@ BENCHMARKS = {
         environment=pairs(
             KV_CACHE_CAPACITY="65536",
             KV_RETRIEVAL_TOPK_IMAGES="4",
+            KV_RETRIEVAL_SCORE_MODE="masked_self_information",
             KV_RETRIEVAL_MASK_ROUNDS="2",
         ),
         input_processing="Top-4 exact 980px tiles + forced overview",
@@ -356,6 +357,25 @@ BENCHMARKS = {
     ),
 }
 
+BENCHMARKS["yarn128k-kv-top4-causal-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-ocr"],
+    name="yarn128k-kv-top4-causal-ocr",
+    description=(
+        "YaRN 128K with legacy causal next-token Top-4 image KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="causal_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+    ),
+    kv_policy=(
+        "whole-image Top-4 retrieval; legacy causal next-token scoring; "
+        "compression off"
+    ),
+    retrieval_query="operation instruction; clear causal next-token scoring",
+)
+
 for tile_size in (686, 490):
     name = f"yarn128k-ocr-tile{tile_size}"
     BENCHMARKS[name] = replace(
@@ -416,6 +436,18 @@ SUITES = {
             ("yarn128k-ocr", "long100"),
             ("yarn128k-ocr-tile686", "long100"),
             ("yarn128k-ocr-tile490", "long100"),
+        ),
+    ),
+    "kv-retrieval-scoring-ablation": SuiteSpec(
+        name="kv-retrieval-scoring-ablation",
+        description=(
+            "Dense context versus causal and bidirectional whole-image "
+            "retrieval scoring"
+        ),
+        arms=(
+            ("yarn128k-ocr", "long100"),
+            ("yarn128k-kv-top4-causal-ocr", "long100"),
+            ("yarn128k-kv-top4-ocr", "long100"),
         ),
     ),
 }
@@ -532,22 +564,30 @@ def dataset_fingerprint(
     }
 
 
-def prediction_ids(predictions_dir: Path) -> list[str]:
+def prediction_records(predictions_dir: Path) -> list[dict[str, Any]]:
     shard_dir = predictions_dir / BENCHMARK
     shards = sorted(shard_dir.glob("part-*.jsonl"))
     if not shards:
         raise FileNotFoundError(
             f"no prediction shards for {BENCHMARK} below {predictions_dir}"
         )
-    values: list[str] = []
+    values: list[dict[str, Any]] = []
     for shard in shards:
         for row in iter_jsonl(shard):
             if "sample_id" not in row:
                 raise RuntimeError(f"prediction without sample_id in {shard}")
-            values.append(str(row["sample_id"]))
-    if len(values) != len(set(values)):
+            values.append(row)
+    sample_ids = [str(row["sample_id"]) for row in values]
+    if len(sample_ids) != len(set(sample_ids)):
         raise RuntimeError(f"duplicate prediction sample IDs below {predictions_dir}")
     return values
+
+
+def prediction_ids(predictions_dir: Path) -> list[str]:
+    return [
+        str(row["sample_id"])
+        for row in prediction_records(predictions_dir)
+    ]
 
 
 def validate_predictions(
@@ -598,6 +638,104 @@ def pct(value: Any) -> float | None:
     return 100.0 * float(value) if isinstance(value, (int, float)) else None
 
 
+def numeric_mean(rows: Sequence[dict[str, Any]], field: str) -> float | None:
+    values = [
+        float(row[field])
+        for row in rows
+        if isinstance(row.get(field), (int, float))
+    ]
+    return sum(values) / len(values) if values else None
+
+
+def target_tile_index(record: dict[str, Any]) -> int | None:
+    layout = record.get("tile_layout")
+    if not isinstance(layout, list) or not layout:
+        return None
+    provenance = record.get("provenance")
+    source_box = (
+        provenance.get("source_bbox_xyxy")
+        if isinstance(provenance, dict)
+        else None
+    )
+    if not (
+        isinstance(source_box, list)
+        and len(source_box) == 4
+        and all(isinstance(value, (int, float)) for value in source_box)
+    ):
+        normalized_box = record.get("target_bbox_1000")
+        width = record.get("image_width")
+        height = record.get("image_height")
+        if not (
+            isinstance(normalized_box, list)
+            and len(normalized_box) == 4
+            and all(
+                isinstance(value, (int, float))
+                for value in normalized_box
+            )
+            and isinstance(width, (int, float))
+            and isinstance(height, (int, float))
+        ):
+            return None
+        source_box = [
+            normalized_box[0] * width / 1000.0,
+            normalized_box[1] * height / 1000.0,
+            normalized_box[2] * width / 1000.0,
+            normalized_box[3] * height / 1000.0,
+        ]
+    center_x = (float(source_box[0]) + float(source_box[2])) / 2.0
+    center_y = (float(source_box[1]) + float(source_box[3])) / 2.0
+    for ordinal, tile in enumerate(layout):
+        if not isinstance(tile, dict):
+            continue
+        box = tile.get("box_xyxy")
+        if not (
+            isinstance(box, list)
+            and len(box) == 4
+            and all(isinstance(value, (int, float)) for value in box)
+        ):
+            continue
+        if (
+            float(box[0]) <= center_x < float(box[2])
+            and float(box[1]) <= center_y < float(box[3])
+        ):
+            index = tile.get("index", ordinal)
+            return int(index) if isinstance(index, (int, float)) else ordinal
+    return None
+
+
+def retrieval_target_tile_recall(
+    predictions: Sequence[dict[str, Any]],
+    records_path: Path,
+    expected_ids: Sequence[str],
+) -> float | None:
+    retrieval_rows = [
+        row
+        for row in predictions
+        if row.get("kv_cache_retrieval_enabled") is True
+    ]
+    if not retrieval_rows:
+        return None
+    expected = set(expected_ids)
+    records = {
+        str(row["sample_id"]): row
+        for row in iter_jsonl(records_path)
+        if str(row.get("sample_id")) in expected
+    }
+    hits = 0
+    for prediction in retrieval_rows:
+        sample_id = str(prediction["sample_id"])
+        record = records.get(sample_id)
+        target_index = target_tile_index(record) if record is not None else None
+        selected = prediction.get("kv_cache_retrieval_indices")
+        if target_index is None or not isinstance(selected, list):
+            raise RuntimeError(
+                "cannot audit retrieval target-tile recall for "
+                f"{sample_id}"
+            )
+        hits += int(target_index in {int(index) for index in selected})
+    return 100.0 * hits / len(retrieval_rows)
+
+
 def resolved_output(result_dir: Path, relative: str) -> Path:
     return result_dir if relative == "." else result_dir / relative
 
@@ -621,6 +759,17 @@ def extract_arm_rows(
     raw_metrics = raw_payload["benchmarks"][BENCHMARK]
     final_metrics = final_payload["benchmarks"][BENCHMARK]
     runtime = raw_payload["runtime"][BENCHMARK]
+    raw_predictions = prediction_records(raw_dir)
+    retrieval_predictions = [
+        row
+        for row in raw_predictions
+        if row.get("kv_cache_retrieval_enabled") is True
+    ]
+    target_recall = retrieval_target_tile_recall(
+        raw_predictions,
+        Path(arm["fingerprint"]["records"]),
+        expected_ids,
+    )
     dense = summary_value(runtime, "dense_prefix_tokens", "mean")
     resident = summary_value(runtime, "cached_prefix_tokens", "mean")
     reduction = None
@@ -649,6 +798,7 @@ def extract_arm_rows(
         "Joint SSR (%)": pct(final_metrics.get("joint_step_success")),
         "Action F1 (%)": pct(final_metrics.get("action_f1_macro_present")),
         "Parse rate (%)": pct(final_metrics.get("parse_rate")),
+        "Target tile recall (%)": target_recall,
         "Final stage": "OCR/fused" if final_dir != raw_dir else "model",
     }
     performance = {
@@ -669,7 +819,19 @@ def extract_arm_rows(
             runtime, "model_elapsed_seconds", "mean"
         ),
         "P95 model latency (s)": summary_value(runtime, "model_elapsed_seconds", "p95"),
+        "Mean retrieval latency (s)": numeric_mean(
+            raw_predictions,
+            "kv_cache_retrieval_seconds",
+        ),
         "Mean tokens/s": summary_value(runtime, "total_tokens_per_second", "mean"),
+        "Mean retrieval candidates": numeric_mean(
+            retrieval_predictions,
+            "kv_cache_retrieval_candidates",
+        ),
+        "Mean selected images": numeric_mean(
+            retrieval_predictions,
+            "kv_cache_retrieval_selected",
+        ),
         "Mean resident KV": resident,
         "Mean dense prefix": dense,
         "Max dense prefix": summary_value(runtime, "dense_prefix_tokens", "max"),
@@ -708,6 +870,9 @@ def extract_arm_rows(
         "OCR": protocol["ocr"],
         "KV policy": protocol["kv_policy"],
         "Retrieval query": protocol["retrieval_query"],
+        "Retrieval score mode": protocol.get("retrieval_score_mode"),
+        "Retrieval mask rounds": protocol.get("retrieval_mask_rounds"),
+        "Retrieval Top-K": protocol.get("retrieval_topk_images"),
     }
     return quality, performance, configuration
 
@@ -894,6 +1059,8 @@ def default_run_id(target: str) -> str:
 
 
 def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
+    environment = dict(spec.environment)
+    score_mode = environment.get("KV_RETRIEVAL_SCORE_MODE")
     return {
         "input_processing": spec.input_processing,
         "rope": spec.rope,
@@ -905,6 +1072,17 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         "ocr": spec.ocr,
         "kv_policy": spec.kv_policy,
         "retrieval_query": spec.retrieval_query,
+        "retrieval_score_mode": score_mode or "disabled",
+        "retrieval_mask_rounds": (
+            int(environment["KV_RETRIEVAL_MASK_ROUNDS"])
+            if score_mode == "masked_self_information"
+            else 0
+        ),
+        "retrieval_topk_images": (
+            int(environment["KV_RETRIEVAL_TOPK_IMAGES"])
+            if score_mode is not None
+            else 0
+        ),
         "block_size": spec.block_size,
         "full_page_tile_size": spec.full_page_tile_size,
     }

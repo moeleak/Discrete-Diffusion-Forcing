@@ -94,6 +94,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
     parser.add_argument(
+        "--kv-retrieval-score-mode",
+        choices=(
+            "masked_self_information",
+            "causal_self_information",
+        ),
+        default="masked_self_information",
+        help=(
+            "whole-image retrieval scorer; causal_self_information is "
+            "retained only for controlled legacy ablations"
+        ),
+    )
+    parser.add_argument(
         "--kv-retrieval-mask-rounds",
         type=int,
         default=2,
@@ -184,6 +196,7 @@ def main() -> None:
         kv_retrieval=LLaDAOGuiKVRetrievalConfig(
             enabled=args.kv_cache_retrieval,
             topk_images=args.kv_retrieval_topk_images,
+            score_mode=args.kv_retrieval_score_mode,
             mask_rounds=args.kv_retrieval_mask_rounds,
             keep_overview=args.kv_retrieval_keep_overview,
         ),

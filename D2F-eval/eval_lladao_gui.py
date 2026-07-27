@@ -152,6 +152,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--kv-retrieval-topk-images", type=int, default=4)
     parser.add_argument(
+        "--kv-retrieval-score-mode",
+        choices=(
+            "masked_self_information",
+            "causal_self_information",
+        ),
+        default="masked_self_information",
+        help=(
+            "whole-image retrieval scorer; causal_self_information is "
+            "retained only for controlled legacy ablations"
+        ),
+    )
+    parser.add_argument(
         "--kv-retrieval-mask-rounds",
         type=int,
         default=2,
@@ -790,8 +802,12 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "kv_cache_compression": args.kv_cache_compression,
         "kv_cache_retrieval": args.kv_cache_retrieval,
         "kv_retrieval_topk_images": args.kv_retrieval_topk_images,
-        "kv_retrieval_score_mode": "masked_self_information",
-        "kv_retrieval_mask_rounds": args.kv_retrieval_mask_rounds,
+        "kv_retrieval_score_mode": args.kv_retrieval_score_mode,
+        "kv_retrieval_mask_rounds": (
+            args.kv_retrieval_mask_rounds
+            if args.kv_retrieval_score_mode == "masked_self_information"
+            else 0
+        ),
         "kv_retrieval_keep_overview": args.kv_retrieval_keep_overview,
         "kv_retrieval_query_source": "native_resize_prompt",
         "vision_tile_size": args.vision_tile_size,
@@ -872,6 +888,7 @@ def main() -> None:
             kv_retrieval=LLaDAOGuiKVRetrievalConfig(
                 enabled=args.kv_cache_retrieval,
                 topk_images=args.kv_retrieval_topk_images,
+                score_mode=args.kv_retrieval_score_mode,
                 mask_rounds=args.kv_retrieval_mask_rounds,
                 keep_overview=args.kv_retrieval_keep_overview,
             ),

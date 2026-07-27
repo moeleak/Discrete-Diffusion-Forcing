@@ -390,6 +390,23 @@ def test_retrieval_masked_queries_require_positive_round_count():
         )
 
 
+def test_retrieval_legacy_scoring_mask_is_causal_after_stored_context():
+    from d2f_vllm.lladao_gui_engine import (
+        build_causal_append_attention_mask,
+    )
+
+    mask = build_causal_append_attention_mask(
+        2,
+        3,
+        device=torch.device("cpu"),
+    )
+    assert mask.tolist() == [
+        [True, True, True, False, False],
+        [True, True, True, True, False],
+        [True, True, True, True, True],
+    ]
+
+
 def test_joint_masked_query_selects_same_position_logits_under_full_prefill():
     from types import SimpleNamespace
 
@@ -492,12 +509,49 @@ def test_image_kv_retrieval_selects_whole_chunks_and_forced_overview():
 def test_image_kv_retrieval_config_rejects_token_eviction_modes():
     from d2f_vllm.lladao_gui_engine import LLaDAOGuiKVRetrievalConfig
 
-    with pytest.raises(ValueError, match="masked_self_information"):
+    assert (
+        LLaDAOGuiKVRetrievalConfig(
+            score_mode="causal_self_information"
+        ).score_mode
+        == "causal_self_information"
+    )
+    with pytest.raises(ValueError, match="causal_self_information"):
         LLaDAOGuiKVRetrievalConfig(score_mode="per_head_eviction")
     with pytest.raises(ValueError, match="non-negative"):
         LLaDAOGuiKVRetrievalConfig(topk_images=-1)
     with pytest.raises(ValueError, match="positive"):
         LLaDAOGuiKVRetrievalConfig(mask_rounds=0)
+
+
+def test_image_kv_retrieval_dispatches_legacy_causal_ablation():
+    from types import SimpleNamespace
+
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        LLaDAOGuiKVRetrievalConfig,
+    )
+
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    engine.kv_retrieval = LLaDAOGuiKVRetrievalConfig(
+        topk_images=1,
+        score_mode="causal_self_information",
+        keep_overview=False,
+    )
+    engine._score_image_span_masked_self_information = (
+        lambda *args: pytest.fail("masked scorer was selected")
+    )
+    engine._score_image_span_causal_self_information = (
+        lambda prefix, index, query_ids, query_positions: [0.1, 0.9][index]
+    )
+    selected, scores, candidates = engine._select_retrieved_image_spans(
+        SimpleNamespace(image_spans=[object(), object()]),
+        has_overview=False,
+        query_ids=[100, 10, 101],
+        query_positions=[7, 8, 9],
+    )
+    assert selected == [1]
+    assert scores == {0: 0.1, 1: 0.9}
+    assert candidates == 2
 
 
 def test_vision_tiles_preserve_two_dimensional_regions():

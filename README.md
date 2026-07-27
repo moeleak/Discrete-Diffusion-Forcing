@@ -401,6 +401,19 @@ retrieval query, score mode, mask rounds, indices, scores, latency, and
 resident/dense prefix ratio separately from KV compression;
 `kv_cache_compression_ratio` remains 1.0.
 
+To compare the dense context, retired causal retrieval scorer, and current
+bidirectional masked scorer on the same 100 examples, use the unified
+controlled ablation:
+
+```shell
+cd /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-scoring-ablation --gpu 0 --limit 100
+```
+
+The runner serializes the arms, verifies their ordered sample-ID fingerprint,
+and emits Markdown/CSV/JSON quality, performance, and protocol tables.
+
 The previously recorded first-100 Top-4 result—0% raw SSR, 71% OCR SSR and
 63/100 target-tile recall—used the retired causal scorer on revision
 `b877dda`. It remains a historical baseline and is not evidence for the
