@@ -419,6 +419,13 @@ python D2F-eval/run_gui_benchmarks.py run \
 
 The runner serializes the arms, verifies their ordered sample-ID fingerprint,
 and emits Markdown/CSV/JSON quality, performance, and protocol tables.
+To isolate only the packed-forward latency optimization from the sequential
+implementation, run:
+
+```shell
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-packing-ablation --gpu 0 --limit 100
+```
 
 The clean 100-sample run on revision `34593f2` predates packed scoring and
 found 75% final SSR for dense context, 71% for legacy causal Top-4 retrieval,

@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_six_suites_without_duplicate_arms():
+def test_catalog_resolves_all_seven_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -174,8 +174,9 @@ def test_catalog_resolves_all_six_suites_without_duplicate_arms():
         "true-long-yarn",
         "tile-size-ablation",
         "kv-retrieval-scoring-ablation",
+        "kv-retrieval-packing-ablation",
     ]
-    assert len(selection.arms) == 16
+    assert len(selection.arms) == 17
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -236,6 +237,36 @@ def test_kv_retrieval_scoring_ablation_changes_only_the_scorer():
         "masked_self_information"
     )
     assert causal_environment == masked_environment
+
+
+def test_kv_retrieval_packing_ablation_changes_only_batching():
+    selection = MODULE.resolve_selection("kv-retrieval-packing-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-sequential-ocr", "long100"),
+        ("yarn128k-kv-top4-ocr", "long100"),
+    )
+    sequential = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-sequential-ocr"
+    ]
+    packed = MODULE.BENCHMARKS["yarn128k-kv-top4-ocr"]
+    assert sequential.launcher == packed.launcher
+    assert sequential.dataset == packed.dataset
+    assert sequential.input_processing == packed.input_processing
+    assert sequential.rope == packed.rope
+    assert sequential.max_context == packed.max_context
+    assert sequential.position_mode == packed.position_mode
+    assert sequential.crop == packed.crop
+    assert sequential.overview == packed.overview
+    assert sequential.truncation == packed.truncation
+    assert sequential.ocr == packed.ocr
+    sequential_environment = dict(sequential.environment)
+    packed_environment = dict(packed.environment)
+    assert sequential_environment.pop(
+        "KV_RETRIEVAL_PACKED_SCORING"
+    ) == "0"
+    assert packed_environment.pop("KV_RETRIEVAL_PACKED_SCORING") == "1"
+    assert sequential_environment == packed_environment
 
 
 def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(

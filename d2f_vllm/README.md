@@ -106,7 +106,7 @@ python D2F-eval/run_gui_benchmarks.py run yarn128k-ocr \
 python D2F-eval/run_gui_benchmarks.py run deployment \
   --gpu 0 --limit 100
 
-# Run all six comparison suites. Identical arms within this invocation are
+# Run all seven comparison suites. Identical arms within this invocation are
 # executed once, but a later invocation always creates a fresh run.
 python D2F-eval/run_gui_benchmarks.py run all \
   --gpu 0 --limit 100
@@ -122,6 +122,7 @@ The predefined suites are:
 | `true-long-yarn` | unscaled 128K versus YaRN with sequential positions | identical ordered long-page IDs |
 | `tile-size-ablation` | full-page image tiles of 980px, 686px, and 490px with every other setting fixed | identical ordered long-page IDs |
 | `kv-retrieval-scoring-ablation` | dense context, legacy causal Top-4 retrieval, and bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
+| `kv-retrieval-packing-ablation` | sequential versus packed bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
 
 All suite arms run serially on the selected GPU so latency and peak-memory
 measurements are not polluted by a competing arm. `--limit` is restricted to
@@ -469,6 +470,17 @@ the budget to reduce transient activation memory, or set
 for score/selection equivalence tests. If the FlashAttention varlen operator
 is unavailable, the runtime safely falls back to sequential scoring and
 reports `kv_cache_retrieval_packed_scoring=false`.
+
+Run the controlled latency/equivalence comparison with:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-packing-ablation --gpu 0 --limit 100
+```
+
+Both arms use the same revision and ordered sample fingerprint. The runner
+changes only `KV_RETRIEVAL_PACKED_SCORING`, executes the arms serially, and
+writes quality, latency, scoring-batch, memory, and protocol tables.
 
 For controlled regression experiments only,
 `KV_RETRIEVAL_SCORE_MODE=causal_self_information` restores the retired

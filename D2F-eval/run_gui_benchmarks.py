@@ -380,6 +380,27 @@ BENCHMARKS["yarn128k-kv-top4-causal-ocr"] = replace(
     retrieval_query="operation instruction; clear causal next-token scoring",
 )
 
+BENCHMARKS["yarn128k-kv-top4-sequential-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-ocr"],
+    name="yarn128k-kv-top4-sequential-ocr",
+    description=(
+        "YaRN 128K with sequential bidirectional masked Top-4 image "
+        "KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+    ),
+    kv_policy=(
+        "whole-image Top-4 retrieval; sequential bidirectional masked "
+        "scoring reference; compression off"
+    ),
+)
+
 for tile_size in (686, 490):
     name = f"yarn128k-ocr-tile{tile_size}"
     BENCHMARKS[name] = replace(
@@ -451,6 +472,16 @@ SUITES = {
         arms=(
             ("yarn128k-ocr", "long100"),
             ("yarn128k-kv-top4-causal-ocr", "long100"),
+            ("yarn128k-kv-top4-ocr", "long100"),
+        ),
+    ),
+    "kv-retrieval-packing-ablation": SuiteSpec(
+        name="kv-retrieval-packing-ablation",
+        description=(
+            "Sequential versus packed bidirectional masked KV retrieval"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
             ("yarn128k-kv-top4-ocr", "long100"),
         ),
     ),
@@ -1426,7 +1457,9 @@ def print_catalog(as_json: bool) -> None:
             }
             for name, suite in SUITES.items()
         },
-        "special": {"all": "run all six suites, deduplicating identical arms"},
+        "special": {
+            "all": "run all seven suites, deduplicating identical arms"
+        },
     }
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
