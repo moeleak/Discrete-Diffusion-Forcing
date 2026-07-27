@@ -414,6 +414,14 @@ python D2F-eval/run_gui_benchmarks.py run \
 The runner serializes the arms, verifies their ordered sample-ID fingerprint,
 and emits Markdown/CSV/JSON quality, performance, and protocol tables.
 
+The clean 100-sample run on revision `34593f2` found 75% final SSR for dense
+context, 71% for legacy causal Top-4 retrieval, and 74% for bidirectional
+masked Top-4 retrieval. Target-tile recall improved from 63% causal to 90%
+masked. Masked retrieval reduced mean resident KV by 53.43% versus dense, but
+its two scoring rounds increased single-request mean latency from 5.93 to
+9.03 seconds. Full tables and per-sample outputs are in
+`$ROOT/results/gui-benchmarks/kv-retrieval-scoring-ablation-n100-34593f2`.
+
 The previously recorded first-100 Top-4 result—0% raw SSR, 71% OCR SSR and
 63/100 target-tile recall—used the retired causal scorer on revision
 `b877dda`. It remains a historical baseline and is not evidence for the

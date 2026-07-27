@@ -218,6 +218,41 @@ clear-query causal next-token likelihood, while the default arm uses two
 complementary masked queries with full bidirectional attention. Ground-truth
 boxes are read only by the report step for target-tile recall.
 
+The clean, controlled run on revision `34593f2` used ordered sample-ID
+SHA-256
+`8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
+All three arms completed 100 samples without errors:
+
+| Configuration | Score mode | Target-tile recall | Raw SSR | OCR SSR | Parse | Mean resident / dense KV | KV reduction | Retrieval latency | Mean model latency | Peak allocated |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Dense YaRN + OCR | disabled; all tiles resident | 100% by construction | 7% | **75%** | 100% | 33,483 / 33,483 | 0% | 0.00 s | **5.93 s** | 50.91 GiB |
+| Top-4 + overview | legacy causal next-token | 63% | 0% | 71% | 93% | 13,399 / 33,483 | **59.98%** | 3.49 s | 5.91 s | **49.74 GiB** |
+| Top-4 + overview | bidirectional masked, 2 rounds | **90%** | **7%** | 74% | **100%** | 15,594 / 33,483 | 53.43% | 5.85 s | 9.03 s | 49.78 GiB |
+
+Action F1 and joint SSR equal 100%/75%, 100%/71%, and 100%/74% for
+dense, causal, and masked respectively. Compared with causal scoring, masked
+scoring gains 27 target-tile-recall points, 7 raw-SSR points, 3 final-SSR
+points, and 7 parse-rate points. The paired audit contains 30 samples found
+only by masked retrieval and 3 found only by causal retrieval; final SSR gains
+five samples and loses two. Compared with dense context, masked retrieval
+loses one final-SSR sample and gains none.
+
+Masked retrieval therefore fixes the causal scorer's relevance failure and
+keeps quality within one point of dense context, while reducing mean resident
+KV by 53.43%. It is not a latency optimization in this single-request
+implementation: its two scoring rounds make mean latency 52.13% higher than
+dense and 52.63% higher than causal. Peak allocated memory falls by only
+1.13 GiB versus dense because the model and preallocated cache dominate that
+measurement. The lower causal convergence-step count is caused by malformed
+or early-terminated outputs and must not be interpreted as better decoding.
+
+The complete run manifest, predictions, logs, and Markdown/CSV/JSON tables
+are under:
+
+```text
+/home/ma-user/work/LLaDA-o/results/gui-benchmarks/kv-retrieval-scoring-ablation-n100-34593f2
+```
+
 The complete Markdown, CSV, JSON, logs, manifests, and per-sample predictions
 are under:
 
