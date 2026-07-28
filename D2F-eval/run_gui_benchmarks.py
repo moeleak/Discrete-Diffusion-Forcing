@@ -692,6 +692,27 @@ SUITES = {
             ),
         ),
     ),
+    "kv-retrieval-final-ablation": SuiteSpec(
+        name="kv-retrieval-final-ablation",
+        description=(
+            "Unique causal, bidirectional Top-4/Top-8, packed cached-visual, "
+            "and controlled OCR-prior arms"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-causal-masked-ocr", "long100"),
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
+            ("yarn128k-kv-top8-sequential-ocr", "long100"),
+            ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-control-ocr",
+                "long100",
+            ),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-ocr",
+                "long100",
+            ),
+        ),
+    ),
 }
 
 

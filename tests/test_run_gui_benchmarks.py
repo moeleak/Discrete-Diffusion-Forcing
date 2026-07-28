@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_twelve_suites_without_duplicate_arms():
+def test_catalog_resolves_all_thirteen_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -180,9 +180,29 @@ def test_catalog_resolves_all_twelve_suites_without_duplicate_arms():
         "kv-retrieval-feedback-ablation",
         "kv-retrieval-ocr-prior-ablation",
         "kv-retrieval-optimized-ablation",
+        "kv-retrieval-final-ablation",
     ]
     assert len(selection.arms) == 23
     assert len(selection.arms) == len(set(selection.arms))
+
+
+def test_final_ablation_runs_each_model_arm_once():
+    selection = MODULE.resolve_selection("kv-retrieval-final-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-causal-masked-ocr", "long100"),
+        ("yarn128k-kv-top4-sequential-ocr", "long100"),
+        ("yarn128k-kv-top8-sequential-ocr", "long100"),
+        ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+        (
+            "yarn128k-kv-top4-cached-masked-prior-control-ocr",
+            "long100",
+        ),
+        (
+            "yarn128k-kv-top4-cached-masked-prior-ocr",
+            "long100",
+        ),
+    )
 
 
 def test_single_benchmark_uses_its_default_dataset():

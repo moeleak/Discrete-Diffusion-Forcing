@@ -128,6 +128,7 @@ The predefined suites are:
 | `kv-retrieval-feedback-ablation` | full joint scoring versus cached-visual bidirectional scoring | identical ordered long-page IDs |
 | `kv-retrieval-ocr-prior-ablation` | cached-visual output plus identical shared-path OCR detections, without versus with neural tile-rank fusion | identical ordered long-page IDs |
 | `kv-retrieval-optimized-ablation` | full joint versus cached-visual scoring, followed by shared-output OCR tile-rank controls | identical ordered long-page IDs |
+| `kv-retrieval-final-ablation` | causal Top-4, bidirectional Top-4/Top-8, packed cached-visual Top-4, and shared-output OCR tile-rank controls without duplicate model arms | identical ordered long-page IDs |
 
 All suite arms run serially on the selected GPU so latency and peak-memory
 measurements are not polluted by a competing arm. `--limit` is restricted to
