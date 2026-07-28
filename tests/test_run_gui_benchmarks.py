@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_nine_suites_without_duplicate_arms():
+def test_catalog_resolves_all_ten_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -177,8 +177,9 @@ def test_catalog_resolves_all_nine_suites_without_duplicate_arms():
         "kv-retrieval-packing-ablation",
         "kv-retrieval-attention-ablation",
         "kv-retrieval-topk-ablation",
+        "kv-retrieval-feedback-ablation",
     ]
-    assert len(selection.arms) == 19
+    assert len(selection.arms) == 20
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -335,6 +336,40 @@ def test_kv_retrieval_topk_ablation_changes_only_retained_tile_count():
     assert top4_environment.pop("KV_RETRIEVAL_TOPK_IMAGES") == "4"
     assert top8_environment.pop("KV_RETRIEVAL_TOPK_IMAGES") == "8"
     assert top4_environment == top8_environment
+
+
+def test_kv_retrieval_feedback_ablation_changes_only_feedback_mode():
+    selection = MODULE.resolve_selection("kv-retrieval-feedback-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-sequential-ocr", "long100"),
+        ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+    )
+    joint = MODULE.BENCHMARKS["yarn128k-kv-top4-sequential-ocr"]
+    cached = MODULE.BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"]
+    assert joint.launcher == cached.launcher
+    assert joint.dataset == cached.dataset
+    assert joint.input_processing == cached.input_processing
+    assert joint.rope == cached.rope
+    assert joint.max_context == cached.max_context
+    assert joint.position_mode == cached.position_mode
+    assert joint.crop == cached.crop
+    assert joint.overview == cached.overview
+    assert joint.truncation == cached.truncation
+    assert joint.ocr == cached.ocr
+    assert joint.retrieval_query == cached.retrieval_query
+    assert joint.block_size == cached.block_size
+    assert joint.full_page_tile_size == cached.full_page_tile_size
+    joint_environment = dict(joint.environment)
+    cached_environment = dict(cached.environment)
+    assert joint_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "masked_self_information"
+    )
+    assert cached_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "cached_masked_self_information"
+    )
+    assert joint_environment == cached_environment
+    assert joint_environment["KV_RETRIEVAL_PACKED_SCORING"] == "0"
 
 
 def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(

@@ -421,6 +421,27 @@ BENCHMARKS["yarn128k-kv-top4-causal-masked-ocr"] = replace(
     ),
 )
 
+BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-sequential-ocr"],
+    name="yarn128k-kv-top4-cached-masked-ocr",
+    description=(
+        "YaRN 128K with cached-visual bidirectional masked Top-4 image "
+        "KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+    ),
+    kv_policy=(
+        "whole-image Top-4 retrieval; bidirectional masked query with "
+        "cached visual KV; compression off"
+    ),
+)
+
 BENCHMARKS["yarn128k-kv-top8-sequential-ocr"] = replace(
     BENCHMARKS["yarn128k-kv-top4-sequential-ocr"],
     name="yarn128k-kv-top8-sequential-ocr",
@@ -547,6 +568,17 @@ SUITES = {
         arms=(
             ("yarn128k-kv-top4-sequential-ocr", "long100"),
             ("yarn128k-kv-top8-sequential-ocr", "long100"),
+        ),
+    ),
+    "kv-retrieval-feedback-ablation": SuiteSpec(
+        name="kv-retrieval-feedback-ablation",
+        description=(
+            "Full joint bidirectional scoring versus cached-visual "
+            "bidirectional query scoring"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
+            ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
         ),
     ),
 }
@@ -1166,6 +1198,7 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
     score_mode = environment.get("KV_RETRIEVAL_SCORE_MODE")
     masked_score_modes = {
         "masked_self_information",
+        "cached_masked_self_information",
         "causal_masked_self_information",
     }
     return {
@@ -1526,7 +1559,7 @@ def print_catalog(as_json: bool) -> None:
             for name, suite in SUITES.items()
         },
         "special": {
-            "all": "run all nine suites, deduplicating identical arms"
+            "all": "run all ten suites, deduplicating identical arms"
         },
     }
     if as_json:
@@ -1540,7 +1573,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all nine suites")
+    print("\n  all                            run all ten suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

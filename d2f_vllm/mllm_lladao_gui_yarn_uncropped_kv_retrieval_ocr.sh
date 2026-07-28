@@ -26,6 +26,9 @@ case "$KV_RETRIEVAL_SCORE_MODE" in
   masked_self_information)
     RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-${SCORING_BATCH_TAG}"
     ;;
+  cached_masked_self_information)
+    RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-cachedmasked${KV_RETRIEVAL_MASK_ROUNDS}"
+    ;;
   causal_masked_self_information)
     RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causalmasked${KV_RETRIEVAL_MASK_ROUNDS}"
     ;;
@@ -33,7 +36,7 @@ case "$KV_RETRIEVAL_SCORE_MODE" in
     RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causal"
     ;;
   *)
-    echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information, causal_masked_self_information, or causal_self_information" >&2
+    echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information, cached_masked_self_information, causal_masked_self_information, or causal_self_information" >&2
     exit 2
     ;;
 esac

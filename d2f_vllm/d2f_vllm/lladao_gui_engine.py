@@ -81,11 +81,13 @@ class LLaDAOGuiKVRetrievalConfig:
             raise ValueError("topk_images must be non-negative")
         if self.score_mode not in {
             "masked_self_information",
+            "cached_masked_self_information",
             "causal_masked_self_information",
             "causal_self_information",
         }:
             raise ValueError(
                 "score_mode must be one of: masked_self_information, "
+                "cached_masked_self_information, "
                 "causal_masked_self_information, "
                 "causal_self_information"
             )
@@ -351,6 +353,25 @@ def build_causal_append_attention_mask(
         device=device,
     ).tril()
     return mask
+
+
+def build_bidirectional_append_attention_mask(
+    context_len: int,
+    active_len: int,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    """Let every masked query token attend the visual prefix and full query."""
+
+    if context_len < 0 or active_len <= 0:
+        raise ValueError(
+            "context_len must be non-negative and active_len positive"
+        )
+    return torch.ones(
+        (active_len, context_len + active_len),
+        dtype=torch.bool,
+        device=device,
+    )
 
 
 def build_generation_attention_mask(
@@ -884,6 +905,100 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         finally:
             reset_context_diffusion_lm()
 
+    def _set_bidirectional_append_context(
+        self,
+        *,
+        context_len: int,
+        active_len: int,
+        start_token: int,
+        page_ids: list[int],
+    ) -> None:
+        """Configure a full-attention query against cached visual KV."""
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        slot_mapping = self._range_slot_mapping(
+            page_ids,
+            start_token,
+            active_len,
+        )
+        block_tables = torch.tensor(
+            page_ids,
+            dtype=torch.int32,
+            device=device,
+        ).view(1, -1)
+        mask = build_bidirectional_append_attention_mask(
+            context_len,
+            active_len,
+            device=device,
+        )
+        seq = _StaticMaskSeq(mask, self.block_length)
+        set_context_diffusion_lm(
+            False,
+            cu_seqlens_q=torch.tensor(
+                [0, active_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            cu_seqlens_k=torch.tensor(
+                [0, context_len + active_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            max_seqlen_q=active_len,
+            max_seqlen_k=context_len + active_len,
+            slot_mapping=slot_mapping,
+            context_lens=torch.tensor(
+                [context_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            block_tables=block_tables,
+            seqs=[seq],
+            seq_lens=[active_len],
+            seq_lens_ts=torch.tensor(
+                [active_len],
+                dtype=torch.int32,
+                device=device,
+            ),
+            kv_cache_layout="unified",
+            need_kv_cache_store=False,
+            full_attention=True,
+        )
+
+    def _forward_append_tokens_bidirectional_paged(
+        self,
+        ids: Sequence[int],
+        positions: Sequence[int],
+        *,
+        context_len: int,
+        page_ids: list[int],
+        start_token: int,
+    ) -> torch.Tensor:
+        if len(ids) != len(positions):
+            raise ValueError(
+                f"ids/positions length mismatch: {len(ids)} vs {len(positions)}"
+            )
+        if not ids:
+            return torch.empty(
+                0,
+                int(self.config.hf_config.vocab_size),
+                device=torch.cuda.current_device(),
+            )
+        self._set_bidirectional_append_context(
+            context_len=context_len,
+            active_len=len(ids),
+            start_token=start_token,
+            page_ids=page_ids,
+        )
+        try:
+            hidden = self.model(
+                self._ids_tensor(ids),
+                self._positions_tensor(positions),
+            )
+            return self.model.compute_logits(hidden)
+        finally:
+            reset_context_diffusion_lm()
+
     def _forward_image_prefix(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -1366,21 +1481,22 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         finally:
             self._prefix_cache.release_pages(page_ids)
 
-    def _score_image_span_causal_masked_self_information(
+    def _score_image_span_cached_masked_self_information(
         self,
         prefix: LLaDAOGuiPrefix,
         span_index: int,
         query_ids: Sequence[int],
         query_positions: Sequence[int],
+        *,
+        bidirectional_query: bool,
     ) -> float:
-        """Score masked same-position targets with one-way query attention.
+        """Score masked targets while reusing one visual-prefix prefill.
 
-        This is the controlled counterpart to bidirectional masked scoring:
-        both modes use the same corrupted queries, targets, positions, and CE.
-        Only the attention topology differs.  Image tokens are encoded
-        bidirectionally once; each query token can attend the image and its
-        causal query prefix, but neither future query tokens nor query-to-image
-        feedback are visible.
+        The optimized bidirectional mode lets every masked query token attend
+        the complete query and visual prefix.  Visual tokens are encoded once
+        and therefore cannot attend back into the query.  Removing that
+        query-to-image feedback avoids recomputing thousands of visual tokens
+        for every complementary mask round.
         """
 
         span = prefix.image_spans[span_index]
@@ -1410,14 +1526,23 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             total_nll: torch.Tensor | None = None
             scored_tokens = 0
             for variant in variants:
-                logits = self._forward_append_tokens_causal_paged(
-                    variant.token_ids,
-                    query_positions,
-                    context_len=cached,
-                    page_ids=page_ids,
-                    start_token=cached,
-                    need_kv_cache_store=False,
-                )
+                if bidirectional_query:
+                    logits = self._forward_append_tokens_bidirectional_paged(
+                        variant.token_ids,
+                        query_positions,
+                        context_len=cached,
+                        page_ids=page_ids,
+                        start_token=cached,
+                    )
+                else:
+                    logits = self._forward_append_tokens_causal_paged(
+                        variant.token_ids,
+                        query_positions,
+                        context_len=cached,
+                        page_ids=page_ids,
+                        start_token=cached,
+                        need_kv_cache_store=False,
+                    )
                 target_indices = torch.tensor(
                     variant.target_indices,
                     dtype=torch.long,
@@ -1442,6 +1567,40 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             return score if math.isfinite(score) else float("-inf")
         finally:
             self._prefix_cache.release_pages(page_ids)
+
+    def _score_image_span_causal_masked_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_index: int,
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
+    ) -> float:
+        """Score identical masked targets with causal query attention."""
+
+        return self._score_image_span_cached_masked_self_information(
+            prefix,
+            span_index,
+            query_ids,
+            query_positions,
+            bidirectional_query=False,
+        )
+
+    def _score_image_span_bidirectional_cached_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_index: int,
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
+    ) -> float:
+        """Score masked targets with bidirectional query and cached image KV."""
+
+        return self._score_image_span_cached_masked_self_information(
+            prefix,
+            span_index,
+            query_ids,
+            query_positions,
+            bidirectional_query=True,
+        )
 
     def _select_retrieved_image_spans(
         self,
@@ -1479,18 +1638,22 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             )
             for index, score in masked_scores.items():
                 scores[index] = score
-        elif (
-            self.kv_retrieval.score_mode
-            == "causal_masked_self_information"
-        ):
+        elif self.kv_retrieval.score_mode in {
+            "cached_masked_self_information",
+            "causal_masked_self_information",
+        }:
+            scorer = (
+                self._score_image_span_bidirectional_cached_self_information
+                if self.kv_retrieval.score_mode
+                == "cached_masked_self_information"
+                else self._score_image_span_causal_masked_self_information
+            )
             for index in candidates:
-                scores[index] = (
-                    self._score_image_span_causal_masked_self_information(
-                        prefix,
-                        index,
-                        query_ids,
-                        query_positions,
-                    )
+                scores[index] = scorer(
+                    prefix,
+                    index,
+                    query_ids,
+                    query_positions,
                 )
             variant_count = len(
                 build_complementary_masked_queries(
@@ -2048,6 +2211,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                         and self.kv_retrieval.score_mode
                         in {
                             "masked_self_information",
+                            "cached_masked_self_information",
                             "causal_masked_self_information",
                         }
                     )

@@ -44,3 +44,10 @@
   KV capacity, and disabled token/head KV compression identical. Only
   `KV_RETRIEVAL_TOPK_IMAGES` may change; the forced overview is additional to
   that source-tile count.
+- A cached-visual bidirectional retrieval ablation must use the fixed first
+  100 ordered long-page sample IDs and keep the corrupted queries,
+  same-position targets, bidirectional query attention, mask rounds, Top-K,
+  image tiles, overview, checkpoint, YaRN/position policy, prompt, seed,
+  decoding, OCR, resident KV capacity, and disabled token/head KV compression
+  identical. Only query-to-image feedback may be removed so that visual KV is
+  encoded once and reused across complementary mask rounds.

@@ -97,13 +97,15 @@ def parse_args() -> argparse.Namespace:
         "--kv-retrieval-score-mode",
         choices=(
             "masked_self_information",
+            "cached_masked_self_information",
             "causal_masked_self_information",
             "causal_self_information",
         ),
         default="masked_self_information",
         help=(
-            "whole-image retrieval scorer; causal_masked_self_information "
-            "is the one-way attention control, while "
+            "whole-image retrieval scorer; cached_masked_self_information "
+            "keeps bidirectional query attention while reusing visual KV, "
+            "causal_masked_self_information is the one-way control, and "
             "causal_self_information is the retired clear-query legacy proxy"
         ),
     )
