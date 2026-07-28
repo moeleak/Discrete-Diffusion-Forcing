@@ -1083,6 +1083,8 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         self,
         sequence_lengths: Sequence[int],
         slot_mapping: torch.Tensor,
+        *,
+        need_kv_cache_store: bool = False,
     ) -> None:
         """Configure independent full-attention documents in one varlen batch."""
 
@@ -1124,9 +1126,259 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             seq_lens=lengths,
             seq_lens_ts=lengths_tensor,
             kv_cache_layout=self.config.kv_cache_layout,
+            need_kv_cache_store=need_kv_cache_store,
+            full_attention=True,
+        )
+
+    def _forward_packed_image_spans(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_indices: Sequence[int],
+        page_ids_by_span: Sequence[Sequence[int]],
+    ) -> None:
+        """Prefill independent image spans together and retain their KV."""
+
+        indices = [int(index) for index in span_indices]
+        page_tables = [list(map(int, pages)) for pages in page_ids_by_span]
+        if not indices:
+            raise ValueError("packed image prefill requires at least one span")
+        if len(indices) != len(page_tables):
+            raise ValueError(
+                "packed image spans/page tables length mismatch: "
+                f"{len(indices)} vs {len(page_tables)}"
+            )
+
+        documents: list[torch.Tensor] = []
+        positions: list[int] = []
+        slot_mappings: list[torch.Tensor] = []
+        sequence_lengths: list[int] = []
+        for span_index, page_ids in zip(indices, page_tables):
+            if span_index < 0 or span_index >= len(prefix.image_spans):
+                raise ValueError(
+                    f"image span index out of range: {span_index}"
+                )
+            span = prefix.image_spans[span_index]
+            span_len = span.token_end - span.token_start
+            required_pages = math.ceil(span_len / self.page_size)
+            if len(page_ids) < required_pages:
+                raise ValueError(
+                    f"image span {span_index} requires {required_pages} "
+                    f"pages, got {len(page_ids)}"
+                )
+            documents.append(
+                prefix.image_embeddings[span.token_start : span.token_end]
+            )
+            positions.extend(
+                prefix.image_positions[span.token_start : span.token_end]
+            )
+            slot_mappings.append(
+                self._range_slot_mapping(page_ids, 0, span_len)
+            )
+            sequence_lengths.append(span_len)
+
+        packed_embeddings = torch.cat(documents, dim=0)
+        slot_mapping = torch.cat(slot_mappings, dim=0)
+        self._set_packed_full_prefill_context(
+            sequence_lengths,
+            slot_mapping,
+            need_kv_cache_store=True,
+        )
+        try:
+            self.model(
+                None,
+                self._positions_tensor(positions),
+                input_embeds=packed_embeddings,
+            )
+        finally:
+            reset_context_diffusion_lm()
+
+    def _set_packed_bidirectional_append_context(
+        self,
+        *,
+        context_lengths: Sequence[int],
+        active_lengths: Sequence[int],
+        page_ids_by_sequence: Sequence[Sequence[int]],
+    ) -> None:
+        """Configure independent full-attention queries over cached prefixes."""
+
+        contexts = [int(length) for length in context_lengths]
+        active = [int(length) for length in active_lengths]
+        page_tables = [
+            list(map(int, pages)) for pages in page_ids_by_sequence
+        ]
+        sequence_count = len(contexts)
+        if sequence_count <= 0:
+            raise ValueError("packed append requires at least one sequence")
+        if (
+            len(active) != sequence_count
+            or len(page_tables) != sequence_count
+        ):
+            raise ValueError(
+                "packed append metadata must contain one entry per sequence"
+            )
+        if any(length <= 0 for length in contexts):
+            raise ValueError("packed append context lengths must be positive")
+        if any(length <= 0 for length in active):
+            raise ValueError("packed append active lengths must be positive")
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        max_pages = max(len(pages) for pages in page_tables)
+        if max_pages <= 0:
+            raise ValueError("packed append page tables cannot be empty")
+        block_tables = torch.full(
+            (sequence_count, max_pages),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        for sequence_index, (context_len, page_ids) in enumerate(
+            zip(contexts, page_tables)
+        ):
+            required_pages = math.ceil(context_len / self.page_size)
+            if len(page_ids) < required_pages:
+                raise ValueError(
+                    f"packed append sequence {sequence_index} requires "
+                    f"{required_pages} pages, got {len(page_ids)}"
+                )
+            block_tables[
+                sequence_index, : len(page_ids)
+            ] = torch.tensor(page_ids, dtype=torch.int32, device=device)
+
+        cu_seqlens_q = [0]
+        cu_seqlens_k = [0]
+        seqs = []
+        for context_len, active_len in zip(contexts, active):
+            cu_seqlens_q.append(cu_seqlens_q[-1] + active_len)
+            cu_seqlens_k.append(
+                cu_seqlens_k[-1] + context_len + active_len
+            )
+            seqs.append(
+                _StaticMaskSeq(
+                    build_bidirectional_append_attention_mask(
+                        context_len,
+                        active_len,
+                        device=device,
+                    ),
+                    self.block_length,
+                )
+            )
+
+        active_tensor = torch.tensor(
+            active,
+            dtype=torch.int32,
+            device=device,
+        )
+        context_tensor = torch.tensor(
+            contexts,
+            dtype=torch.int32,
+            device=device,
+        )
+        set_context_diffusion_lm(
+            False,
+            cu_seqlens_q=torch.tensor(
+                cu_seqlens_q,
+                dtype=torch.int32,
+                device=device,
+            ),
+            cu_seqlens_k=torch.tensor(
+                cu_seqlens_k,
+                dtype=torch.int32,
+                device=device,
+            ),
+            max_seqlen_q=max(active),
+            max_seqlen_k=max(
+                context_len + active_len
+                for context_len, active_len in zip(contexts, active)
+            ),
+            slot_mapping=torch.full(
+                (sum(active),),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            ),
+            context_lens=context_tensor,
+            block_tables=block_tables,
+            seqs=seqs,
+            seq_lens=active,
+            seq_lens_ts=active_tensor,
+            kv_cache_layout="unified",
             need_kv_cache_store=False,
             full_attention=True,
         )
+
+    def _forward_append_tokens_bidirectional_paged_batch(
+        self,
+        ids_by_sequence: Sequence[Sequence[int]],
+        positions_by_sequence: Sequence[Sequence[int]],
+        *,
+        context_lengths: Sequence[int],
+        page_ids_by_sequence: Sequence[Sequence[int]],
+        target_indices: Sequence[int] | None = None,
+    ) -> torch.Tensor:
+        """Run independent bidirectional queries in one paged-KV forward."""
+
+        ids = [list(map(int, sequence)) for sequence in ids_by_sequence]
+        positions = [
+            list(map(int, sequence)) for sequence in positions_by_sequence
+        ]
+        if not ids:
+            raise ValueError("packed append requires at least one query")
+        if len(ids) != len(positions):
+            raise ValueError(
+                "packed append ids/positions sequence-count mismatch"
+            )
+        for sequence_index, (token_ids, token_positions) in enumerate(
+            zip(ids, positions)
+        ):
+            if len(token_ids) != len(token_positions):
+                raise ValueError(
+                    "packed append ids/positions length mismatch for "
+                    f"sequence {sequence_index}: "
+                    f"{len(token_ids)} vs {len(token_positions)}"
+                )
+            if not token_ids:
+                raise ValueError("packed append queries cannot be empty")
+
+        self._set_packed_bidirectional_append_context(
+            context_lengths=context_lengths,
+            active_lengths=[len(sequence) for sequence in ids],
+            page_ids_by_sequence=page_ids_by_sequence,
+        )
+        try:
+            hidden = self.model(
+                self._ids_tensor(
+                    token_id
+                    for sequence in ids
+                    for token_id in sequence
+                ),
+                self._positions_tensor(
+                    position
+                    for sequence in positions
+                    for position in sequence
+                ),
+            )
+            if target_indices is not None:
+                selected_values = list(map(int, target_indices))
+                if not selected_values:
+                    raise ValueError(
+                        "packed append target indices cannot be empty"
+                    )
+                if (
+                    min(selected_values) < 0
+                    or max(selected_values) >= hidden.shape[0]
+                ):
+                    raise ValueError(
+                        "packed append target index is out of range"
+                    )
+                selected = torch.tensor(
+                    selected_values,
+                    dtype=torch.long,
+                    device=hidden.device,
+                )
+                hidden = hidden.index_select(0, selected)
+            return self.model.compute_logits(hidden)
+        finally:
+            reset_context_diffusion_lm()
 
     def _forward_packed_masked_queries(
         self,
@@ -1568,6 +1820,192 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         finally:
             self._prefix_cache.release_pages(page_ids)
 
+    def _score_image_spans_cached_masked_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        candidate_indices: Sequence[int],
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
+    ) -> tuple[dict[int, float], int, bool]:
+        """Score cached visual spans with two model forwards per packed batch."""
+
+        candidates = [int(index) for index in candidate_indices]
+        if not candidates:
+            return {}, 0, False
+        variants = build_complementary_masked_queries(
+            query_ids,
+            self.mask_token_id,
+            mask_rounds=self.kv_retrieval.mask_rounds,
+        )
+        if not variants:
+            return (
+                {index: float("-inf") for index in candidates},
+                0,
+                False,
+            )
+        if len(query_ids) != len(query_positions):
+            raise ValueError(
+                "masked query ids/positions length mismatch: "
+                f"{len(query_ids)} vs {len(query_positions)}"
+            )
+
+        available_pages = self._prefix_cache.num_free_pages
+        candidate_plans: list[tuple[int, int, int, int]] = []
+        for index in candidates:
+            if index < 0 or index >= len(prefix.image_spans):
+                raise ValueError(f"image span index out of range: {index}")
+            span = prefix.image_spans[index]
+            span_len = span.token_end - span.token_start
+            scoring_len = span_len + len(query_ids)
+            if scoring_len > self.kv_cache_capacity:
+                raise ValueError(
+                    f"retrieval scoring length {scoring_len} exceeds "
+                    f"kv_cache_capacity={self.kv_cache_capacity}"
+                )
+            pages_needed = math.ceil(span_len / self.page_size)
+            if pages_needed > available_pages:
+                raise RuntimeError(
+                    f"image span {index} requires {pages_needed} KV pages, "
+                    f"but only {available_pages} are free"
+                )
+            attention_tokens = scoring_len * len(variants)
+            candidate_plans.append(
+                (index, span_len, pages_needed, attention_tokens)
+            )
+
+        batches: list[list[tuple[int, int, int, int]]] = []
+        batch: list[tuple[int, int, int, int]] = []
+        batch_pages = 0
+        batch_tokens = 0
+        for plan in candidate_plans:
+            _, _, pages_needed, attention_tokens = plan
+            exceeds_budget = (
+                batch
+                and (
+                    batch_pages + pages_needed > available_pages
+                    or batch_tokens + attention_tokens
+                    > self.kv_retrieval.max_batch_tokens
+                )
+            )
+            if exceeds_budget:
+                batches.append(batch)
+                batch = []
+                batch_pages = 0
+                batch_tokens = 0
+            batch.append(plan)
+            batch_pages += pages_needed
+            batch_tokens += attention_tokens
+        if batch:
+            batches.append(batch)
+
+        device = prefix.image_embeddings.device
+        candidate_offsets = {
+            index: offset for offset, index in enumerate(candidates)
+        }
+        total_nll = torch.zeros(
+            len(candidates),
+            dtype=torch.float32,
+            device=device,
+        )
+        scored_tokens = torch.zeros(
+            len(candidates),
+            dtype=torch.int64,
+            device=device,
+        )
+        model_forwards = 0
+        query_positions_list = list(map(int, query_positions))
+
+        for packed_batch in batches:
+            allocated: list[tuple[int, list[int]]] = []
+            try:
+                for index, _, pages_needed, _ in packed_batch:
+                    allocated.append(
+                        (
+                            index,
+                            self._prefix_cache.allocate_pages(pages_needed),
+                        )
+                    )
+                pages_by_index = dict(allocated)
+                span_indices = [plan[0] for plan in packed_batch]
+                self._forward_packed_image_spans(
+                    prefix,
+                    span_indices,
+                    [pages_by_index[index] for index in span_indices],
+                )
+                model_forwards += 1
+
+                ids_by_sequence: list[Sequence[int]] = []
+                positions_by_sequence: list[Sequence[int]] = []
+                context_lengths: list[int] = []
+                page_ids_by_sequence: list[Sequence[int]] = []
+                absolute_targets: list[int] = []
+                target_ids: list[int] = []
+                target_owners: list[int] = []
+                query_offset = 0
+                for index, span_len, _, _ in packed_batch:
+                    owner = candidate_offsets[index]
+                    for variant in variants:
+                        ids_by_sequence.append(variant.token_ids)
+                        positions_by_sequence.append(query_positions_list)
+                        context_lengths.append(span_len)
+                        page_ids_by_sequence.append(pages_by_index[index])
+                        absolute_targets.extend(
+                            query_offset + target_index
+                            for target_index in variant.target_indices
+                        )
+                        target_ids.extend(variant.target_ids)
+                        target_owners.extend(
+                            [owner] * len(variant.target_ids)
+                        )
+                        query_offset += len(variant.token_ids)
+
+                logits = (
+                    self._forward_append_tokens_bidirectional_paged_batch(
+                        ids_by_sequence,
+                        positions_by_sequence,
+                        context_lengths=context_lengths,
+                        page_ids_by_sequence=page_ids_by_sequence,
+                        target_indices=absolute_targets,
+                    )
+                )
+                model_forwards += 1
+                token_nll = F.cross_entropy(
+                    logits.float(),
+                    torch.tensor(
+                        target_ids,
+                        dtype=torch.long,
+                        device=logits.device,
+                    ),
+                    reduction="none",
+                )
+                owners = torch.tensor(
+                    target_owners,
+                    dtype=torch.long,
+                    device=device,
+                )
+                total_nll.index_add_(0, owners, token_nll)
+                scored_tokens.index_add_(
+                    0,
+                    owners,
+                    torch.ones_like(owners, dtype=torch.int64),
+                )
+            finally:
+                for _, page_ids in allocated:
+                    self._prefix_cache.release_pages(page_ids)
+
+        finite_counts = scored_tokens.clamp_min(1).to(dtype=torch.float32)
+        score_values = (-total_nll / finite_counts).tolist()
+        count_values = scored_tokens.tolist()
+        scores = {}
+        for offset, index in enumerate(candidates):
+            score = float(score_values[offset])
+            scores[index] = (
+                score
+                if count_values[offset] > 0 and math.isfinite(score)
+                else float("-inf")
+            )
+        return scores, model_forwards, True
+
     def _score_image_span_causal_masked_self_information(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -1638,22 +2076,52 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             )
             for index, score in masked_scores.items():
                 scores[index] = score
-        elif self.kv_retrieval.score_mode in {
-            "cached_masked_self_information",
-            "causal_masked_self_information",
-        }:
-            scorer = (
-                self._score_image_span_bidirectional_cached_self_information
-                if self.kv_retrieval.score_mode
-                == "cached_masked_self_information"
-                else self._score_image_span_causal_masked_self_information
+        elif self.kv_retrieval.score_mode == "cached_masked_self_information":
+            packed_cached_scoring = (
+                self.kv_retrieval.packed_scoring
+                and flash_attn_varlen_func is not None
             )
+            if packed_cached_scoring:
+                cached_scores, score_batches, packed_scoring = (
+                    self._score_image_spans_cached_masked_self_information(
+                        prefix,
+                        candidates,
+                        query_ids,
+                        query_positions,
+                    )
+                )
+                for index, score in cached_scores.items():
+                    scores[index] = score
+            else:
+                for index in candidates:
+                    scores[index] = (
+                        self._score_image_span_bidirectional_cached_self_information(
+                            prefix,
+                            index,
+                            query_ids,
+                            query_positions,
+                        )
+                    )
+                variant_count = len(
+                    build_complementary_masked_queries(
+                        query_ids,
+                        self.mask_token_id,
+                        mask_rounds=self.kv_retrieval.mask_rounds,
+                    )
+                )
+                score_batches = len(candidates) * (1 + variant_count)
+        elif (
+            self.kv_retrieval.score_mode
+            == "causal_masked_self_information"
+        ):
             for index in candidates:
-                scores[index] = scorer(
-                    prefix,
-                    index,
-                    query_ids,
-                    query_positions,
+                scores[index] = (
+                    self._score_image_span_causal_masked_self_information(
+                        prefix,
+                        index,
+                        query_ids,
+                        query_positions,
+                    )
                 )
             variant_count = len(
                 build_complementary_masked_queries(

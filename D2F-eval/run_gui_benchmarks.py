@@ -437,13 +437,35 @@ BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"] = replace(
         KV_RETRIEVAL_TOPK_IMAGES="4",
         KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
         KV_RETRIEVAL_MASK_ROUNDS="2",
-        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_PACKED_SCORING="1",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
         MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; bidirectional masked query with "
-        "cached visual KV; compression off"
+        "packed cached visual KV; compression off"
+    ),
+)
+
+BENCHMARKS["yarn128k-kv-top4-cached-sequential-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"],
+    name="yarn128k-kv-top4-cached-sequential-ocr",
+    description=(
+        "YaRN 128K with per-candidate cached-visual bidirectional masked "
+        "Top-4 image KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
+    ),
+    kv_policy=(
+        "whole-image Top-4 retrieval; sequential cached visual KV; "
+        "compression off"
     ),
 )
 
@@ -459,7 +481,7 @@ BENCHMARKS["yarn128k-kv-top4-cached-masked-prior-control-ocr"] = replace(
         KV_RETRIEVAL_TOPK_IMAGES="4",
         KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
         KV_RETRIEVAL_MASK_ROUNDS="2",
-        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_PACKED_SCORING="1",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
         KV_RETRIEVAL_OCR_PRIOR="1",
         MODEL_PROXIMITY_WEIGHT="0.10",
@@ -483,7 +505,7 @@ BENCHMARKS["yarn128k-kv-top4-cached-masked-prior-ocr"] = replace(
         KV_RETRIEVAL_TOPK_IMAGES="4",
         KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
         KV_RETRIEVAL_MASK_ROUNDS="2",
-        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_PACKED_SCORING="1",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
         KV_RETRIEVAL_OCR_PRIOR="1",
         MODEL_PROXIMITY_WEIGHT="0.10",
@@ -630,7 +652,7 @@ SUITES = {
         ),
         arms=(
             ("yarn128k-kv-top4-sequential-ocr", "long100"),
-            ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+            ("yarn128k-kv-top4-cached-sequential-ocr", "long100"),
         ),
     ),
     "kv-retrieval-ocr-prior-ablation": SuiteSpec(
@@ -1309,7 +1331,11 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         ),
         "retrieval_packed_scoring": (
             environment.get("KV_RETRIEVAL_PACKED_SCORING", "1") == "1"
-            if score_mode == "masked_self_information"
+            if score_mode
+            in {
+                "masked_self_information",
+                "cached_masked_self_information",
+            }
             else False
         ),
         "retrieval_max_batch_tokens": (

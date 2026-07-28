@@ -181,7 +181,7 @@ def test_catalog_resolves_all_twelve_suites_without_duplicate_arms():
         "kv-retrieval-ocr-prior-ablation",
         "kv-retrieval-optimized-ablation",
     ]
-    assert len(selection.arms) == 22
+    assert len(selection.arms) == 23
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -345,10 +345,12 @@ def test_kv_retrieval_feedback_ablation_changes_only_feedback_mode():
 
     assert selection.arms == (
         ("yarn128k-kv-top4-sequential-ocr", "long100"),
-        ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+        ("yarn128k-kv-top4-cached-sequential-ocr", "long100"),
     )
     joint = MODULE.BENCHMARKS["yarn128k-kv-top4-sequential-ocr"]
-    cached = MODULE.BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"]
+    cached = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-cached-sequential-ocr"
+    ]
     assert joint.launcher == cached.launcher
     assert joint.dataset == cached.dataset
     assert joint.input_processing == cached.input_processing
@@ -372,6 +374,19 @@ def test_kv_retrieval_feedback_ablation_changes_only_feedback_mode():
     )
     assert joint_environment == cached_environment
     assert joint_environment["KV_RETRIEVAL_PACKED_SCORING"] == "0"
+
+
+def test_cached_optimized_arm_packs_prefill_and_queries():
+    cached = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-cached-masked-ocr"
+    ]
+    environment = dict(cached.environment)
+
+    assert environment["KV_RETRIEVAL_SCORE_MODE"] == (
+        "cached_masked_self_information"
+    )
+    assert environment["KV_RETRIEVAL_PACKED_SCORING"] == "1"
+    assert MODULE.protocol_dict(cached)["retrieval_packed_scoring"] is True
 
 
 def test_kv_retrieval_ocr_prior_ablation_changes_only_ocr_ranking():

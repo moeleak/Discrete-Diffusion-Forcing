@@ -413,7 +413,13 @@ candidate image once, reuses that visual KV across the complementary masked
 queries, and still lets all masked query tokens attend bidirectionally to one
 another and to the complete visual prefix. The controlled difference from
 `masked_self_information` is that the query no longer writes back into image
-states:
+states. With `KV_RETRIEVAL_PACKED_SCORING=1` (the default), all candidate
+images share one varlen prefill and all complementary queries share one
+paged-KV append per soft-budget batch. This reduces the usual Top-4 scorer
+from roughly 45 model forwards to two forwards per packed batch while
+preserving independent sequence boundaries. Set
+`KV_RETRIEVAL_PACKED_SCORING=0` only for the per-candidate equivalence
+control:
 
 ```shell
 LIMIT=100 GPU=0 \

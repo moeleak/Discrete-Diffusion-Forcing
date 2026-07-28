@@ -50,7 +50,7 @@ if [[ "$KV_CACHE_RETRIEVAL" == "1" ]]; then
       RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-${SCORING_BATCH_TAG}"
       ;;
     cached_masked_self_information)
-      RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-cachedmasked${KV_RETRIEVAL_MASK_ROUNDS}"
+      RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-cachedmasked${KV_RETRIEVAL_MASK_ROUNDS}-${SCORING_BATCH_TAG}"
       ;;
     causal_masked_self_information)
       RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causalmasked${KV_RETRIEVAL_MASK_ROUNDS}"

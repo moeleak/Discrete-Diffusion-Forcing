@@ -1014,6 +1014,182 @@ def test_cached_bidirectional_scorer_reuses_one_visual_prefill():
     assert all(call[2:] == (2, [4], 2) for call in query_calls)
 
 
+def test_packed_cached_bidirectional_scorer_uses_two_model_forwards():
+    from collections import deque
+    from types import SimpleNamespace
+
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        LLaDAOGuiKVRetrievalConfig,
+    )
+
+    class FakeAllocator:
+        def __init__(self):
+            self.free_pages = deque(range(20))
+            self.allocations = []
+            self.releases = []
+
+        @property
+        def num_free_pages(self):
+            return len(self.free_pages)
+
+        def allocate_pages(self, count):
+            pages = [self.free_pages.popleft() for _ in range(count)]
+            self.allocations.append(list(pages))
+            return pages
+
+        def release_pages(self, pages):
+            self.releases.append(list(pages))
+            self.free_pages.extend(pages)
+
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    engine.kv_retrieval = LLaDAOGuiKVRetrievalConfig(
+        score_mode="cached_masked_self_information",
+        mask_rounds=2,
+        packed_scoring=True,
+        max_batch_tokens=1_000,
+    )
+    engine.mask_token_id = 99
+    engine.kv_cache_capacity = 100
+    engine.page_size = 8
+    engine._prefix_cache = FakeAllocator()
+    packed_prefills = []
+    packed_queries = []
+
+    def fake_packed_prefill(prefix, indices, page_tables):
+        del prefix
+        packed_prefills.append(
+            (list(indices), [list(pages) for pages in page_tables])
+        )
+
+    def fake_packed_query(
+        ids_by_sequence,
+        positions_by_sequence,
+        *,
+        context_lengths,
+        page_ids_by_sequence,
+        target_indices,
+    ):
+        ids = [tuple(sequence) for sequence in ids_by_sequence]
+        positions = [tuple(sequence) for sequence in positions_by_sequence]
+        packed_queries.append(
+            (
+                ids,
+                positions,
+                list(context_lengths),
+                [list(pages) for pages in page_ids_by_sequence],
+                list(target_indices),
+            )
+        )
+        clean = (100, 10, 11, 12, 101)
+        logits = torch.zeros(sum(map(len, ids)), 128)
+        offset = 0
+        for sequence in ids:
+            for local_index, token_id in enumerate(sequence):
+                if token_id == 99:
+                    logits[offset + local_index, clean[local_index]] = 20.0
+            offset += len(sequence)
+        return logits.index_select(
+            0,
+            torch.tensor(target_indices, dtype=torch.long),
+        )
+
+    engine._forward_packed_image_spans = fake_packed_prefill
+    engine._forward_append_tokens_bidirectional_paged_batch = (
+        fake_packed_query
+    )
+    prefix = SimpleNamespace(
+        image_spans=[
+            SimpleNamespace(token_start=0, token_end=2),
+            SimpleNamespace(token_start=2, token_end=5),
+        ],
+        image_embeddings=torch.zeros(5, 1),
+    )
+    scores, forwards, packed = (
+        engine._score_image_spans_cached_masked_self_information(
+            prefix,
+            [0, 1],
+            [100, 10, 11, 12, 101],
+            [20, 21, 22, 23, 24],
+        )
+    )
+
+    assert scores[0] > -0.001
+    assert scores[1] > -0.001
+    assert forwards == 2
+    assert packed is True
+    assert packed_prefills == [([0, 1], [[0], [1]])]
+    assert len(packed_queries) == 1
+    ids, positions, context_lengths, page_tables, target_indices = (
+        packed_queries[0]
+    )
+    assert ids == [
+        (100, 99, 11, 99, 101),
+        (100, 10, 99, 12, 101),
+        (100, 99, 11, 99, 101),
+        (100, 10, 99, 12, 101),
+    ]
+    assert positions == [(20, 21, 22, 23, 24)] * 4
+    assert context_lengths == [2, 2, 3, 3]
+    assert page_tables == [[0], [0], [1], [1]]
+    assert target_indices == [1, 3, 7, 11, 13, 17]
+    assert engine._prefix_cache.allocations == [[0], [1]]
+    assert engine._prefix_cache.releases == [[0], [1]]
+
+
+def test_image_kv_retrieval_dispatches_packed_cached_scorer(monkeypatch):
+    from types import SimpleNamespace
+
+    import d2f_vllm.lladao_gui_engine as gui_engine
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        LLaDAOGuiKVRetrievalConfig,
+    )
+
+    monkeypatch.setattr(gui_engine, "flash_attn_varlen_func", object())
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    engine.mask_token_id = 99
+    engine.kv_retrieval = LLaDAOGuiKVRetrievalConfig(
+        topk_images=1,
+        score_mode="cached_masked_self_information",
+        mask_rounds=2,
+        packed_scoring=True,
+        keep_overview=False,
+    )
+    packed_calls = []
+    engine._score_image_spans_cached_masked_self_information = (
+        lambda prefix, indices, query_ids, query_positions: (
+            packed_calls.append(
+                (
+                    prefix,
+                    list(indices),
+                    list(query_ids),
+                    list(query_positions),
+                )
+            )
+            or ({0: 0.1, 1: 0.9}, 2, True)
+        )
+    )
+    engine._score_image_span_bidirectional_cached_self_information = (
+        lambda *args: pytest.fail("sequential cached scorer was selected")
+    )
+    selected, scores, candidates, score_batches, packed = (
+        engine._select_retrieved_image_spans(
+            SimpleNamespace(image_spans=[object(), object()]),
+            has_overview=False,
+            query_ids=[100, 10, 11, 12, 101],
+            query_positions=[7, 8, 9, 10, 11],
+        )
+    )
+
+    assert selected == [1]
+    assert scores == {0: 0.1, 1: 0.9}
+    assert candidates == 2
+    assert score_batches == 2
+    assert packed is True
+    assert len(packed_calls) == 1
+
+
 def test_image_kv_retrieval_dispatches_cached_bidirectional_scorer():
     from types import SimpleNamespace
 
@@ -1028,6 +1204,7 @@ def test_image_kv_retrieval_dispatches_cached_bidirectional_scorer():
         topk_images=1,
         score_mode="cached_masked_self_information",
         mask_rounds=2,
+        packed_scoring=False,
         keep_overview=False,
     )
     engine._score_image_span_bidirectional_cached_self_information = (
