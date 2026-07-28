@@ -482,6 +482,18 @@ python D2F-eval/run_gui_benchmarks.py run \
   kv-retrieval-optimized-ablation --gpu 0 --limit 100
 ```
 
+After the attention, Top-8, and optimized runs have completed, generate one
+cross-run report. The summarizer refuses incomplete runs, non-100-sample runs,
+or mismatched ordered sample fingerprints:
+
+```shell
+python D2F-eval/summarize_kv_retrieval_results.py \
+  --attention-run "$ROOT/results/gui-benchmarks/<attention-run>" \
+  --top8-run "$ROOT/results/gui-benchmarks/<top8-run>" \
+  --optimized-run "$ROOT/results/gui-benchmarks/<optimized-run>" \
+  --output-dir "$ROOT/results/gui-benchmarks/kv-retrieval-final-report"
+```
+
 The clean 100-sample run on revision `34593f2` predates packed scoring and
 found 75% final SSR for dense context, 71% for legacy causal Top-4 retrieval,
 and 74% for sequential bidirectional masked Top-4 retrieval. Target-tile
