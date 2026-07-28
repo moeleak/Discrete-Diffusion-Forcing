@@ -106,7 +106,7 @@ python D2F-eval/run_gui_benchmarks.py run yarn128k-ocr \
 python D2F-eval/run_gui_benchmarks.py run deployment \
   --gpu 0 --limit 100
 
-# Run all seven comparison suites. Identical arms within this invocation are
+# Run all comparison suites. Identical arms within this invocation are
 # executed once, but a later invocation always creates a fresh run.
 python D2F-eval/run_gui_benchmarks.py run all \
   --gpu 0 --limit 100
@@ -123,6 +123,11 @@ The predefined suites are:
 | `tile-size-ablation` | full-page image tiles of 980px, 686px, and 490px with every other setting fixed | identical ordered long-page IDs |
 | `kv-retrieval-scoring-ablation` | dense context, legacy causal Top-4 retrieval, and bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
 | `kv-retrieval-packing-ablation` | sequential versus packed bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
+| `kv-retrieval-attention-ablation` | causal versus bidirectional attention over identical masked queries | identical ordered long-page IDs |
+| `kv-retrieval-topk-ablation` | bidirectional Top-4 versus Top-8 retained source tiles | identical ordered long-page IDs |
+| `kv-retrieval-feedback-ablation` | full joint scoring versus cached-visual bidirectional scoring | identical ordered long-page IDs |
+| `kv-retrieval-ocr-prior-ablation` | cached-visual output plus identical shared-path OCR detections, without versus with neural tile-rank fusion | identical ordered long-page IDs |
+| `kv-retrieval-optimized-ablation` | full joint versus cached-visual scoring, followed by shared-output OCR tile-rank controls | identical ordered long-page IDs |
 
 All suite arms run serially on the selected GPU so latency and peak-memory
 measurements are not polluted by a competing arm. `--limit` is restricted to

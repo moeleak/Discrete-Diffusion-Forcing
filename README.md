@@ -407,6 +407,38 @@ batch count, indices, scores, latency, and resident/dense prefix ratio
 separately from KV compression;
 `kv_cache_compression_ratio` remains 1.0.
 
+For the latency-oriented bidirectional path, set
+`KV_RETRIEVAL_SCORE_MODE=cached_masked_self_information`. It encodes each
+candidate image once, reuses that visual KV across the complementary masked
+queries, and still lets all masked query tokens attend bidirectionally to one
+another and to the complete visual prefix. The controlled difference from
+`masked_self_information` is that the query no longer writes back into image
+states:
+
+```shell
+LIMIT=100 GPU=0 \
+KV_RETRIEVAL_SCORE_MODE=cached_masked_self_information \
+  bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh
+```
+
+When full-page OCR contains duplicate target text, the neural image-ranking
+signal can also be used to rank OCR detections. This does not read target
+coordinates or provenance boxes:
+
+```shell
+LIMIT=100 GPU=0 \
+KV_RETRIEVAL_SCORE_MODE=cached_masked_self_information \
+KV_RETRIEVAL_OCR_PRIOR=1 \
+MODEL_PROXIMITY_WEIGHT=0.10 \
+RETRIEVAL_PROXIMITY_WEIGHT=0.00 \
+RETRIEVAL_RANK_WEIGHT=0.02 \
+  bash d2f_vllm/mllm_lladao_gui_yarn_uncropped_kv_retrieval_ocr.sh
+```
+
+Set `OCR_DETECTIONS_CACHE=/path/to/detections.jsonl` to reuse identical OCR
+detections in a controlled fusion ablation. The cache contains only OCR text,
+confidence, and detected boxes; it does not contain target locations.
+
 To compare the dense context, retired causal retrieval scorer, and current
 bidirectional masked scorer on the same 100 examples, use the unified
 controlled ablation:
@@ -425,6 +457,29 @@ implementation, run:
 ```shell
 python D2F-eval/run_gui_benchmarks.py run \
   kv-retrieval-packing-ablation --gpu 0 --limit 100
+```
+
+The corresponding attention-direction, retained-tile, visual-feedback, and
+OCR-ranking controls are:
+
+```shell
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-attention-ablation --gpu 0 --limit 100
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-topk-ablation --gpu 0 --limit 100
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-feedback-ablation --gpu 0 --limit 100
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-ocr-prior-ablation --gpu 0 --limit 100
+```
+
+To measure the end-to-end improvement in one invocation while reusing the
+cached model predictions and exact OCR detections for the quality controls,
+run:
+
+```shell
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-optimized-ablation --gpu 0 --limit 100
 ```
 
 The clean 100-sample run on revision `34593f2` predates packed scoring and

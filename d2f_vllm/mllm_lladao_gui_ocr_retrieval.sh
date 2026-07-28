@@ -20,6 +20,10 @@ MODEL_OUTPUT="${MODEL_OUTPUT:-$RESULT_ROOT/model}"
 OUTPUT_DIR="${OUTPUT_DIR:-$RESULT_ROOT/fused}"
 LOG="${LOG:-$ROOT/logs/d2f-vllm-ocr-retrieval-${MODE}-${REVISION}-n${LIMIT}-${RUN_ID}.log}"
 MODEL_PROXIMITY_WEIGHT="${MODEL_PROXIMITY_WEIGHT:-0.10}"
+KV_RETRIEVAL_OCR_PRIOR="${KV_RETRIEVAL_OCR_PRIOR:-0}"
+RETRIEVAL_PROXIMITY_WEIGHT="${RETRIEVAL_PROXIMITY_WEIGHT:-0.00}"
+RETRIEVAL_RANK_WEIGHT="${RETRIEVAL_RANK_WEIGHT:-0.02}"
+OCR_DETECTIONS_CACHE="${OCR_DETECTIONS_CACHE:-}"
 LABEL_CONTROL_OFFSET="${LABEL_CONTROL_OFFSET:-40}"
 
 if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || (( LIMIT > 100 )); then
@@ -34,6 +38,11 @@ if [[ "$RUN_MODEL" != "0" && "$RUN_MODEL" != "1" ]]; then
   echo "RUN_MODEL must be 0 or 1" >&2
   exit 2
 fi
+if [[ "$KV_RETRIEVAL_OCR_PRIOR" != "0" \
+  && "$KV_RETRIEVAL_OCR_PRIOR" != "1" ]]; then
+  echo "KV_RETRIEVAL_OCR_PRIOR must be 0 or 1" >&2
+  exit 2
+fi
 
 mkdir -p "$(dirname "$LOG")" "$RESULT_ROOT"
 exec > >(tee -a "$LOG") 2>&1
@@ -41,6 +50,11 @@ exec > >(tee -a "$LOG") 2>&1
 echo "[$(date '+%F %T')] starting native-resize D2F + full-page OCR retrieval"
 echo "[$(date '+%F %T')] mode=$MODE revision=$REVISION samples=$LIMIT gpu=$GPU"
 echo "[$(date '+%F %T')] model_output=$MODEL_OUTPUT fused_output=$OUTPUT_DIR"
+echo "[$(date '+%F %T')] kv_retrieval_ocr_prior=$KV_RETRIEVAL_OCR_PRIOR"
+echo "[$(date '+%F %T')] model_weight=$MODEL_PROXIMITY_WEIGHT retrieval_proximity_weight=$RETRIEVAL_PROXIMITY_WEIGHT retrieval_rank_weight=$RETRIEVAL_RANK_WEIGHT"
+if [[ -n "$OCR_DETECTIONS_CACHE" ]]; then
+  echo "[$(date '+%F %T')] detections_cache=$OCR_DETECTIONS_CACHE"
+fi
 
 if [[ "$RUN_MODEL" == "1" ]]; then
   MODE="$MODE" \
@@ -64,10 +78,39 @@ else
   echo "[$(date '+%F %T')] reusing model predictions"
 fi
 
-(
-  cd "$LLADAO_REPO"
-  CUDA_VISIBLE_DEVICES="$GPU" PYTHONUNBUFFERED=1 \
-    "$OCR_PYTHON" -m eval.gui_grounding.ocr_fullpage_retrieval \
+if [[ "$KV_RETRIEVAL_OCR_PRIOR" == "1" ]]; then
+  OCR_ARGS=(
+    --benchmark-root "$BENCHMARK_ROOT"
+    --predictions-dir "$MODEL_OUTPUT"
+    --output-dir "$OUTPUT_DIR"
+    --benchmark mind2web_fullpage
+    --limit "$LIMIT"
+    --model-dir "$OCR_MODEL_DIR"
+    --model-proximity-weight "$MODEL_PROXIMITY_WEIGHT"
+    --retrieval-proximity-weight "$RETRIEVAL_PROXIMITY_WEIGHT"
+    --retrieval-rank-weight "$RETRIEVAL_RANK_WEIGHT"
+    --label-control-offset "$LABEL_CONTROL_OFFSET"
+    --gpu
+  )
+  if [[ -n "$OCR_DETECTIONS_CACHE" ]]; then
+    OCR_ARGS+=(--detections-cache "$OCR_DETECTIONS_CACHE")
+  else
+    OCR_ARGS+=(
+      --write-detections-cache "$OUTPUT_DIR/ocr-detections.jsonl"
+    )
+  fi
+  (
+    cd "$LLADAO_REPO"
+    CUDA_VISIBLE_DEVICES="$GPU" PYTHONUNBUFFERED=1 \
+      PYTHONPATH="$LLADAO_REPO${PYTHONPATH:+:$PYTHONPATH}" \
+      "$OCR_PYTHON" "$REPO/D2F-eval/ocr_retrieval_kv_prior.py" \
+        "${OCR_ARGS[@]}"
+  )
+else
+  (
+    cd "$LLADAO_REPO"
+    CUDA_VISIBLE_DEVICES="$GPU" PYTHONUNBUFFERED=1 \
+      "$OCR_PYTHON" -m eval.gui_grounding.ocr_fullpage_retrieval \
       --benchmark-root "$BENCHMARK_ROOT" \
       --predictions-dir "$MODEL_OUTPUT" \
       --output-dir "$OUTPUT_DIR" \
@@ -77,7 +120,8 @@ fi
       --model-proximity-weight "$MODEL_PROXIMITY_WEIGHT" \
       --label-control-offset "$LABEL_CONTROL_OFFSET" \
       --gpu
-)
+  )
+fi
 
 while IFS= read -r config; do
   cp "$config" "$OUTPUT_DIR/$(basename "$config")"

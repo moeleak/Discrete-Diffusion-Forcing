@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_ten_suites_without_duplicate_arms():
+def test_catalog_resolves_all_twelve_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -178,8 +178,10 @@ def test_catalog_resolves_all_ten_suites_without_duplicate_arms():
         "kv-retrieval-attention-ablation",
         "kv-retrieval-topk-ablation",
         "kv-retrieval-feedback-ablation",
+        "kv-retrieval-ocr-prior-ablation",
+        "kv-retrieval-optimized-ablation",
     ]
-    assert len(selection.arms) == 20
+    assert len(selection.arms) == 22
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -370,6 +372,96 @@ def test_kv_retrieval_feedback_ablation_changes_only_feedback_mode():
     )
     assert joint_environment == cached_environment
     assert joint_environment["KV_RETRIEVAL_PACKED_SCORING"] == "0"
+
+
+def test_kv_retrieval_ocr_prior_ablation_changes_only_ocr_ranking():
+    selection = MODULE.resolve_selection(
+        "kv-retrieval-ocr-prior-ablation"
+    )
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+        (
+            "yarn128k-kv-top4-cached-masked-prior-control-ocr",
+            "long100",
+        ),
+        (
+            "yarn128k-kv-top4-cached-masked-prior-ocr",
+            "long100",
+        ),
+    )
+    baseline = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-cached-masked-prior-control-ocr"
+    ]
+    prior = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-cached-masked-prior-ocr"
+    ]
+    assert baseline.launcher == prior.launcher
+    assert baseline.dataset == prior.dataset
+    assert baseline.input_processing == prior.input_processing
+    assert baseline.rope == prior.rope
+    assert baseline.max_context == prior.max_context
+    assert baseline.position_mode == prior.position_mode
+    assert baseline.crop == prior.crop
+    assert baseline.overview == prior.overview
+    assert baseline.truncation == prior.truncation
+    assert baseline.kv_policy == prior.kv_policy
+    assert baseline.retrieval_query == prior.retrieval_query
+    assert baseline.block_size == prior.block_size
+    assert baseline.full_page_tile_size == prior.full_page_tile_size
+    assert baseline.ocr != prior.ocr
+    baseline_environment = dict(baseline.environment)
+    prior_environment = dict(prior.environment)
+    assert baseline_environment.pop("RETRIEVAL_RANK_WEIGHT") == "0.00"
+    assert prior_environment.pop("RETRIEVAL_RANK_WEIGHT") == "0.02"
+    assert baseline_environment == prior_environment
+    assert MODULE.protocol_dict(baseline)["ocr_retrieval_prior"] is False
+    assert MODULE.protocol_dict(prior)["ocr_retrieval_prior"] is True
+
+
+def test_ocr_prior_suite_reuses_exact_model_and_detection_artifacts(
+    tmp_path,
+):
+    cached = {
+        "id": "long100--cached",
+        "benchmark": "yarn128k-kv-top4-cached-masked-ocr",
+        "dataset": "long100",
+        "result_dir": str(tmp_path / "cached"),
+        "environment": {},
+    }
+    control = {
+        "id": "long100--control",
+        "benchmark": (
+            "yarn128k-kv-top4-cached-masked-prior-control-ocr"
+        ),
+        "dataset": "long100",
+        "result_dir": str(tmp_path / "control"),
+        "environment": {},
+    }
+    prior = {
+        "id": "long100--prior",
+        "benchmark": "yarn128k-kv-top4-cached-masked-prior-ocr",
+        "dataset": "long100",
+        "result_dir": str(tmp_path / "prior"),
+        "environment": {},
+    }
+
+    MODULE.wire_shared_ocr_prior_artifacts([cached, control, prior])
+
+    assert control["environment"] == {
+        "RUN_MODEL": "0",
+        "MODEL_OUTPUT": str(tmp_path / "cached" / "model"),
+    }
+    assert control["reuses_model_from"] == cached["id"]
+    assert prior["environment"] == {
+        "RUN_MODEL": "0",
+        "MODEL_OUTPUT": str(tmp_path / "control" / "model"),
+        "OCR_DETECTIONS_CACHE": str(
+            tmp_path / "control" / "fused" / "ocr-detections.jsonl"
+        ),
+    }
+    assert prior["reuses_model_from"] == control["id"]
+    assert prior["reuses_ocr_detections_from"] == control["id"]
 
 
 def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(

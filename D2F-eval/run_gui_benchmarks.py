@@ -146,6 +146,7 @@ BENCHMARKS = {
             KV_RETRIEVAL_MASK_ROUNDS="2",
             KV_RETRIEVAL_PACKED_SCORING="1",
             KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+            MODEL_PROXIMITY_WEIGHT="0.10",
         ),
         input_processing="Top-4 exact 980px tiles + forced overview",
         rope="YaRN factor 8",
@@ -372,6 +373,7 @@ BENCHMARKS["yarn128k-kv-top4-causal-ocr"] = replace(
         KV_RETRIEVAL_MASK_ROUNDS="2",
         KV_RETRIEVAL_PACKED_SCORING="1",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; legacy causal next-token scoring; "
@@ -394,6 +396,7 @@ BENCHMARKS["yarn128k-kv-top4-sequential-ocr"] = replace(
         KV_RETRIEVAL_MASK_ROUNDS="2",
         KV_RETRIEVAL_PACKED_SCORING="0",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; sequential bidirectional masked "
@@ -414,6 +417,7 @@ BENCHMARKS["yarn128k-kv-top4-causal-masked-ocr"] = replace(
         KV_RETRIEVAL_MASK_ROUNDS="2",
         KV_RETRIEVAL_PACKED_SCORING="0",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; causal masked same-position scoring; "
@@ -435,11 +439,58 @@ BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"] = replace(
         KV_RETRIEVAL_MASK_ROUNDS="2",
         KV_RETRIEVAL_PACKED_SCORING="0",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     kv_policy=(
         "whole-image Top-4 retrieval; bidirectional masked query with "
         "cached visual KV; compression off"
     ),
+)
+
+BENCHMARKS["yarn128k-kv-top4-cached-masked-prior-control-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-cached-masked-ocr"],
+    name="yarn128k-kv-top4-cached-masked-prior-control-ocr",
+    description=(
+        "YaRN 128K cached-visual Top-4 retrieval with the shared OCR "
+        "fusion path and disabled tile-rank prior"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        KV_RETRIEVAL_OCR_PRIOR="1",
+        MODEL_PROXIMITY_WEIGHT="0.10",
+        RETRIEVAL_PROXIMITY_WEIGHT="0.00",
+        RETRIEVAL_RANK_WEIGHT="0.00",
+    ),
+    ocr="shared prompt-only OCR control; neural tile-rank prior off",
+)
+
+BENCHMARKS["yarn128k-kv-top4-cached-masked-prior-ocr"] = replace(
+    BENCHMARKS[
+        "yarn128k-kv-top4-cached-masked-prior-control-ocr"
+    ],
+    name="yarn128k-kv-top4-cached-masked-prior-ocr",
+    description=(
+        "YaRN 128K with cached-visual bidirectional Top-4 retrieval and "
+        "neural tile-rank OCR fusion"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="cached_masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        KV_RETRIEVAL_OCR_PRIOR="1",
+        MODEL_PROXIMITY_WEIGHT="0.10",
+        RETRIEVAL_PROXIMITY_WEIGHT="0.00",
+        RETRIEVAL_RANK_WEIGHT="0.02",
+    ),
+    ocr="prompt-only OCR + neural tile-rank prior",
 )
 
 BENCHMARKS["yarn128k-kv-top8-sequential-ocr"] = replace(
@@ -456,6 +507,7 @@ BENCHMARKS["yarn128k-kv-top8-sequential-ocr"] = replace(
         KV_RETRIEVAL_MASK_ROUNDS="2",
         KV_RETRIEVAL_PACKED_SCORING="0",
         KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+        MODEL_PROXIMITY_WEIGHT="0.10",
     ),
     input_processing="Top-8 exact 980px tiles + forced overview",
     kv_policy=(
@@ -579,6 +631,43 @@ SUITES = {
         arms=(
             ("yarn128k-kv-top4-sequential-ocr", "long100"),
             ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+        ),
+    ),
+    "kv-retrieval-ocr-prior-ablation": SuiteSpec(
+        name="kv-retrieval-ocr-prior-ablation",
+        description=(
+            "Prompt-only OCR versus neural tile-rank OCR fusion with the "
+            "same cached-visual bidirectional model outputs"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-control-ocr",
+                "long100",
+            ),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-ocr",
+                "long100",
+            ),
+        ),
+    ),
+    "kv-retrieval-optimized-ablation": SuiteSpec(
+        name="kv-retrieval-optimized-ablation",
+        description=(
+            "Full joint retrieval versus cached-visual retrieval, followed "
+            "by controlled neural tile-rank OCR fusion"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
+            ("yarn128k-kv-top4-cached-masked-ocr", "long100"),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-control-ocr",
+                "long100",
+            ),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-ocr",
+                "long100",
+            ),
         ),
     ),
 }
@@ -1233,6 +1322,28 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
             if score_mode is not None
             else 0
         ),
+        "ocr_shared_retrieval_fusion": (
+            environment.get("KV_RETRIEVAL_OCR_PRIOR", "0") == "1"
+        ),
+        "ocr_retrieval_prior": (
+            float(
+                environment.get("RETRIEVAL_PROXIMITY_WEIGHT", "0.00")
+            )
+            > 0.0
+            or float(
+                environment.get("RETRIEVAL_RANK_WEIGHT", "0.00")
+            )
+            > 0.0
+        ),
+        "ocr_model_proximity_weight": float(
+            environment.get("MODEL_PROXIMITY_WEIGHT", "0.10")
+        ),
+        "ocr_retrieval_proximity_weight": float(
+            environment.get("RETRIEVAL_PROXIMITY_WEIGHT", "0.00")
+        ),
+        "ocr_retrieval_rank_weight": float(
+            environment.get("RETRIEVAL_RANK_WEIGHT", "0.00")
+        ),
         "block_size": spec.block_size,
         "full_page_tile_size": spec.full_page_tile_size,
     }
@@ -1297,6 +1408,52 @@ def build_arm_record(
         "worktree_dirty": worktree_dirty,
         "status": "pending",
     }
+
+
+def wire_shared_ocr_prior_artifacts(
+    records: Sequence[dict[str, Any]],
+) -> None:
+    control_name = (
+        "yarn128k-kv-top4-cached-masked-prior-control-ocr"
+    )
+    cached_name = "yarn128k-kv-top4-cached-masked-ocr"
+    prior_name = "yarn128k-kv-top4-cached-masked-prior-ocr"
+    by_key = {
+        (record["benchmark"], record["dataset"]): record
+        for record in records
+    }
+    for (benchmark_name, dataset_name), control in by_key.items():
+        if benchmark_name != control_name:
+            continue
+        cached = by_key.get((cached_name, dataset_name))
+        if cached is None:
+            continue
+        cached_result = Path(cached["result_dir"])
+        control["environment"].update(
+            {
+                "RUN_MODEL": "0",
+                "MODEL_OUTPUT": str(cached_result / "model"),
+            }
+        )
+        control["reuses_model_from"] = cached["id"]
+    for (benchmark_name, dataset_name), prior in by_key.items():
+        if benchmark_name != prior_name:
+            continue
+        control = by_key.get((control_name, dataset_name))
+        if control is None:
+            continue
+        control_result = Path(control["result_dir"])
+        prior["environment"].update(
+            {
+                "RUN_MODEL": "0",
+                "MODEL_OUTPUT": str(control_result / "model"),
+                "OCR_DETECTIONS_CACHE": str(
+                    control_result / "fused" / "ocr-detections.jsonl"
+                ),
+            }
+        )
+        prior["reuses_model_from"] = control["id"]
+        prior["reuses_ocr_detections_from"] = control["id"]
 
 
 def stream_command(
@@ -1410,6 +1567,7 @@ def run_selection(args: argparse.Namespace) -> Path | None:
                 worktree_dirty=worktree_dirty,
             )
         )
+    wire_shared_ocr_prior_artifacts(records)
 
     if args.dry_run:
         print(
@@ -1559,7 +1717,7 @@ def print_catalog(as_json: bool) -> None:
             for name, suite in SUITES.items()
         },
         "special": {
-            "all": "run all ten suites, deduplicating identical arms"
+            "all": "run all suites, deduplicating identical arms"
         },
     }
     if as_json:
@@ -1573,7 +1731,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all ten suites")
+    print("\n  all                            run all suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

@@ -51,3 +51,10 @@
   decoding, OCR, resident KV capacity, and disabled token/head KV compression
   identical. Only query-to-image feedback may be removed so that visual KV is
   encoded once and reused across complementary mask rounds.
+- A KV-retrieval OCR-prior ablation must use the fixed first 100 ordered
+  long-page sample IDs and the same model predictions, OCR detections,
+  instruction text, confidence/similarity thresholds, label-control offset,
+  and model-location weight in both arms. Only the neural retrieval tile-rank
+  prior may be enabled. Runtime fusion must never read the target box,
+  provenance source box, or any other ground-truth location; target-tile
+  accuracy is post-hoc audit data only.
