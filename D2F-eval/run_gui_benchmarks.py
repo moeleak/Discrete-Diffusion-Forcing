@@ -553,6 +553,24 @@ for tile_size in (686, 490):
         full_page_tile_size=tile_size,
     )
 
+for tile_size in (686, 490):
+    name = (
+        "yarn128k-kv-top4-cached-masked-prior-"
+        f"tile{tile_size}-ocr"
+    )
+    BENCHMARKS[name] = replace(
+        BENCHMARKS["yarn128k-kv-top4-cached-masked-prior-ocr"],
+        name=name,
+        description=(
+            "YaRN 128K cached-visual bidirectional Top-4 retrieval with "
+            f"{tile_size}px tiles and neural tile-rank OCR fusion"
+        ),
+        input_processing=(
+            f"Top-4 exact {tile_size}px tiles + forced overview"
+        ),
+        full_page_tile_size=tile_size,
+    )
+
 
 SUITES = {
     "deployment": SuiteSpec(
@@ -598,6 +616,27 @@ SUITES = {
             ("yarn128k-ocr", "long100"),
             ("yarn128k-ocr-tile686", "long100"),
             ("yarn128k-ocr-tile490", "long100"),
+        ),
+    ),
+    "kv-retrieval-tile-size-ablation": SuiteSpec(
+        name="kv-retrieval-tile-size-ablation",
+        description=(
+            "Cached-visual bidirectional Top-4 retrieval with 980px, "
+            "686px, and 490px full-page tiles"
+        ),
+        arms=(
+            (
+                "yarn128k-kv-top4-cached-masked-prior-ocr",
+                "long100",
+            ),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-tile686-ocr",
+                "long100",
+            ),
+            (
+                "yarn128k-kv-top4-cached-masked-prior-tile490-ocr",
+                "long100",
+            ),
         ),
     ),
     "kv-retrieval-scoring-ablation": SuiteSpec(

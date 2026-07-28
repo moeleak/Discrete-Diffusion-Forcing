@@ -126,6 +126,7 @@ The predefined suites are:
 | `yarn-isolation` | original 16K versus YaRN on native-resized input | identical ordered long-page IDs |
 | `true-long-yarn` | unscaled 128K versus YaRN with sequential positions | identical ordered long-page IDs |
 | `tile-size-ablation` | full-page image tiles of 980px, 686px, and 490px with every other setting fixed | identical ordered long-page IDs |
+| `kv-retrieval-tile-size-ablation` | packed cached-visual bidirectional Top-4 retrieval with 980px, 686px, and 490px tiles | identical ordered long-page IDs |
 | `kv-retrieval-scoring-ablation` | dense context, legacy causal Top-4 retrieval, and bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
 | `kv-retrieval-packing-ablation` | sequential versus packed bidirectional masked Top-4 retrieval | identical ordered long-page IDs |
 | `kv-retrieval-attention-ablation` | causal versus bidirectional attention over identical masked queries | identical ordered long-page IDs |
@@ -192,6 +193,20 @@ to 490 pixels. All three values are exact multiples of the 14px vision patch,
 so the experiment does not introduce interior-tile padding. The runtime
 prompt derives its image count from the selected tile size instead of reusing
 the prepared 980px layout.
+
+To measure tile size on the optimized retrieval path instead of dense context,
+run:
+
+```bash
+python D2F-eval/run_gui_benchmarks.py run \
+  kv-retrieval-tile-size-ablation --gpu 0 --limit 100
+```
+
+This suite keeps cached-visual packed bidirectional scoring, Top-4 retention,
+the forced overview, YaRN positions, neural tile-rank OCR fusion, D2F block
+size 16, the 65,536-token resident-KV capacity, and disabled KV compression
+fixed. Only the 14px-aligned full-page tile edge changes from 980 to 686 to
+490 pixels.
 
 The validated 100-sample run used ordered sample-ID SHA-256
 `8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.

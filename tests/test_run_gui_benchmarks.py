@@ -210,7 +210,7 @@ def test_resume_cli_accepts_existing_run_directory(tmp_path):
     assert args.run_dir == tmp_path
 
 
-def test_catalog_resolves_all_thirteen_suites_without_duplicate_arms():
+def test_catalog_resolves_all_fourteen_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -219,6 +219,7 @@ def test_catalog_resolves_all_thirteen_suites_without_duplicate_arms():
         "yarn-isolation",
         "true-long-yarn",
         "tile-size-ablation",
+        "kv-retrieval-tile-size-ablation",
         "kv-retrieval-scoring-ablation",
         "kv-retrieval-packing-ablation",
         "kv-retrieval-attention-ablation",
@@ -228,7 +229,7 @@ def test_catalog_resolves_all_thirteen_suites_without_duplicate_arms():
         "kv-retrieval-optimized-ablation",
         "kv-retrieval-final-ablation",
     ]
-    assert len(selection.arms) == 23
+    assert len(selection.arms) == 25
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -276,6 +277,46 @@ def test_tile_size_ablation_changes_only_the_full_page_tile_size():
     assert {spec.kv_policy for spec in specs} == {"dense; compression off"}
     assert {spec.environment for spec in specs} == {
         MODULE.pairs(KV_CACHE_CAPACITY="65536")
+    }
+
+
+def test_kv_retrieval_tile_size_ablation_changes_only_tile_geometry():
+    selection = MODULE.resolve_selection(
+        "kv-retrieval-tile-size-ablation"
+    )
+    specs = [MODULE.BENCHMARKS[name] for name, _ in selection.arms]
+
+    assert [spec.full_page_tile_size for spec in specs] == [980, 686, 490]
+    assert [spec.input_processing for spec in specs] == [
+        "Top-4 exact 980px tiles + forced overview",
+        "Top-4 exact 686px tiles + forced overview",
+        "Top-4 exact 490px tiles + forced overview",
+    ]
+    assert {spec.block_size for spec in specs} == {16}
+    assert {spec.rope for spec in specs} == {"YaRN factor 8"}
+    assert {spec.position_mode for spec in specs} == {"strided"}
+    assert {spec.overview for spec in specs} == {"yes (force-kept)"}
+    assert {spec.ocr for spec in specs} == {
+        "prompt-only OCR + neural tile-rank prior"
+    }
+    assert {spec.kv_policy for spec in specs} == {
+        (
+            "whole-image Top-4 retrieval; bidirectional masked query with "
+            "packed cached visual KV; compression off"
+        )
+    }
+    assert len({spec.environment for spec in specs}) == 1
+    assert dict(specs[0].environment) == {
+        "KV_CACHE_CAPACITY": "65536",
+        "KV_RETRIEVAL_TOPK_IMAGES": "4",
+        "KV_RETRIEVAL_SCORE_MODE": "cached_masked_self_information",
+        "KV_RETRIEVAL_MASK_ROUNDS": "2",
+        "KV_RETRIEVAL_PACKED_SCORING": "1",
+        "KV_RETRIEVAL_MAX_BATCH_TOKENS": "65536",
+        "KV_RETRIEVAL_OCR_PRIOR": "1",
+        "MODEL_PROXIMITY_WEIGHT": "0.10",
+        "RETRIEVAL_PROXIMITY_WEIGHT": "0.00",
+        "RETRIEVAL_RANK_WEIGHT": "0.02",
     }
 
 
