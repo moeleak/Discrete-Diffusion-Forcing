@@ -1503,6 +1503,50 @@ def wire_shared_ocr_prior_artifacts(
         prior["reuses_ocr_detections_from"] = control["id"]
 
 
+def validate_arm_fingerprint(
+    record: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    current = dataset_fingerprint(
+        Path(record["benchmark_root"]),
+        limit,
+    )
+    saved = record["fingerprint"]
+    for key in ("manifest_sha256", "sample_ids_sha256", "samples"):
+        if current[key] != saved[key]:
+            raise RuntimeError(
+                f"dataset fingerprint changed for {record['id']}: {key}"
+            )
+    return current
+
+
+def reuse_completed_model_output(
+    record: dict[str, Any],
+    expected_ids: Sequence[str],
+) -> bool:
+    """Resume a failed OCR stage without repeating completed model inference."""
+
+    if record.get("raw_output") != "model" or not record.get("final_output"):
+        return False
+    model_output = resolved_output(
+        Path(record["result_dir"]),
+        record["raw_output"],
+    )
+    try:
+        validate_predictions(model_output, expected_ids)
+        score_payload(model_output)
+    except (FileNotFoundError, RuntimeError):
+        return False
+    record["environment"].update(
+        {
+            "RUN_MODEL": "0",
+            "MODEL_OUTPUT": str(model_output.resolve()),
+        }
+    )
+    record["resume_reused_model_output"] = str(model_output.resolve())
+    return True
+
+
 def stream_command(
     command: Sequence[str],
     *,
@@ -1538,6 +1582,101 @@ def stream_command(
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
             raise
+
+
+def execute_run(run_dir: Path, run: dict[str, Any], *, resume: bool) -> Path:
+    run_path = run_dir / "run.json"
+    repo = Path(run["repo"])
+    limit = int(run["limit"])
+    gpu = str(run["gpu"])
+    now = datetime.now().astimezone().isoformat()
+    if resume:
+        run.setdefault("resume_events", []).append(
+            {
+                "at": now,
+                "revision": git_revision(repo),
+            }
+        )
+        run["status"] = "running"
+        run["completed_at"] = None
+        run.pop("report_error", None)
+        atomic_write_json(run_path, run)
+
+    base_environment = os.environ.copy()
+    base_environment["PYTHONUNBUFFERED"] = "1"
+    for index, record in enumerate(run["arms"], start=1):
+        current = validate_arm_fingerprint(record, limit)
+        if record.get("status") == "completed":
+            extract_arm_rows(record, current["sample_ids"])
+            print(
+                f"[{index}/{len(run['arms'])}] keeping completed "
+                f"{record['id']}",
+                flush=True,
+            )
+            continue
+        reused_model = False
+        if resume and record.get("status") in {"failed", "running"}:
+            reused_model = reuse_completed_model_output(
+                record,
+                current["sample_ids"],
+            )
+        action = "resuming" if resume else "running"
+        suffix = " with completed model output" if reused_model else ""
+        print(
+            f"[{index}/{len(run['arms'])}] {action} {record['id']} "
+            f"on GPU {gpu}{suffix}",
+            flush=True,
+        )
+        if resume and record.get("started_at"):
+            record.setdefault("initial_started_at", record["started_at"])
+        record["status"] = "running"
+        record["started_at"] = datetime.now().astimezone().isoformat()
+        record.pop("error", None)
+        atomic_write_json(run_path, run)
+        environment = base_environment.copy()
+        environment.update(record["environment"])
+        try:
+            status = stream_command(
+                record["command"],
+                cwd=repo,
+                environment=environment,
+                log_path=Path(record["log"]),
+            )
+            if status != 0:
+                raise subprocess.CalledProcessError(status, record["command"])
+            current = validate_arm_fingerprint(record, limit)
+            extract_arm_rows(record, current["sample_ids"])
+        except BaseException as exc:
+            record["status"] = "failed"
+            record["completed_at"] = datetime.now().astimezone().isoformat()
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            run["status"] = "failed"
+            run["completed_at"] = datetime.now().astimezone().isoformat()
+            atomic_write_json(run_path, run)
+            raise
+        record["status"] = "completed"
+        record["completed_at"] = datetime.now().astimezone().isoformat()
+        atomic_write_json(run_path, run)
+
+    try:
+        build_reports(run_dir)
+    except BaseException as exc:
+        run["status"] = "failed"
+        run["completed_at"] = datetime.now().astimezone().isoformat()
+        run["report_error"] = f"{type(exc).__name__}: {exc}"
+        atomic_write_json(run_path, run)
+        raise
+    run["status"] = "completed"
+    run["completed_at"] = datetime.now().astimezone().isoformat()
+    run["reports"] = {
+        "quality": str((run_dir / "tables" / "quality.md").resolve()),
+        "performance": str((run_dir / "tables" / "performance.md").resolve()),
+        "protocol": str((run_dir / "tables" / "protocol.md").resolve()),
+    }
+    atomic_write_json(run_path, run)
+    print(f"completed: {run_dir}", flush=True)
+    print(f"tables: {run_dir / 'tables' / 'README.md'}", flush=True)
+    return run_dir
 
 
 def dataset_root(root: Path, dataset_name: str) -> Path:
@@ -1684,64 +1823,33 @@ def run_selection(args: argparse.Namespace) -> Path | None:
     }
     run_path = run_dir / "run.json"
     atomic_write_json(run_path, run)
+    return execute_run(run_dir, run, resume=False)
 
-    base_environment = os.environ.copy()
-    base_environment["PYTHONUNBUFFERED"] = "1"
-    for index, record in enumerate(run["arms"], start=1):
-        print(
-            f"[{index}/{len(run['arms'])}] running {record['id']} on GPU {args.gpu}",
-            flush=True,
+
+def resume_run(run_dir: Path) -> Path:
+    run_dir = run_dir.expanduser().resolve()
+    run_path = run_dir / "run.json"
+    if not run_path.is_file():
+        raise FileNotFoundError(f"missing unified run manifest: {run_path}")
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    if run.get("schema_version") != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"unsupported run schema: {run.get('schema_version')}"
         )
-        record["status"] = "running"
-        record["started_at"] = datetime.now().astimezone().isoformat()
-        atomic_write_json(run_path, run)
-        environment = base_environment.copy()
-        environment.update(record["environment"])
-        try:
-            status = stream_command(
-                record["command"],
-                cwd=repo,
-                environment=environment,
-                log_path=Path(record["log"]),
-            )
-            if status != 0:
-                raise subprocess.CalledProcessError(status, record["command"])
-            current = dataset_fingerprint(
-                Path(record["benchmark_root"]),
-                args.limit,
-            )
-            extract_arm_rows(record, current["sample_ids"])
-        except BaseException as exc:
-            record["status"] = "failed"
-            record["completed_at"] = datetime.now().astimezone().isoformat()
-            record["error"] = f"{type(exc).__name__}: {exc}"
-            run["status"] = "failed"
-            run["completed_at"] = datetime.now().astimezone().isoformat()
-            atomic_write_json(run_path, run)
-            raise
-        record["status"] = "completed"
-        record["completed_at"] = datetime.now().astimezone().isoformat()
-        atomic_write_json(run_path, run)
-
-    try:
+    if run.get("status") == "completed":
         build_reports(run_dir)
-    except BaseException as exc:
-        run["status"] = "failed"
-        run["completed_at"] = datetime.now().astimezone().isoformat()
-        run["report_error"] = f"{type(exc).__name__}: {exc}"
-        atomic_write_json(run_path, run)
-        raise
-    run["status"] = "completed"
-    run["completed_at"] = datetime.now().astimezone().isoformat()
-    run["reports"] = {
-        "quality": str((run_dir / "tables" / "quality.md").resolve()),
-        "performance": str((run_dir / "tables" / "performance.md").resolve()),
-        "protocol": str((run_dir / "tables" / "protocol.md").resolve()),
-    }
-    atomic_write_json(run_path, run)
-    print(f"completed: {run_dir}", flush=True)
-    print(f"tables: {run_dir / 'tables' / 'README.md'}", flush=True)
-    return run_dir
+        print(f"already completed: {run_dir}", flush=True)
+        return run_dir
+    repo = Path(run["repo"])
+    current_revision = git_revision(repo)
+    if current_revision != run["revision"]:
+        raise RuntimeError(
+            "refusing to resume with a different repository revision: "
+            f"{current_revision} != {run['revision']}"
+        )
+    if git_worktree_dirty(repo):
+        raise RuntimeError("refusing to resume with a dirty repository")
+    return execute_run(run_dir, run, resume=True)
 
 
 def print_catalog(as_json: bool) -> None:
@@ -1830,6 +1938,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="validate inputs and print commands without creating a run",
     )
 
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help=(
+            "resume a failed unified run and reuse any complete model "
+            "predictions"
+        ),
+    )
+    resume_parser.add_argument("run_dir", type=Path)
+
     report_parser = subparsers.add_parser(
         "report",
         help="validate and regenerate tables for an existing unified run",
@@ -1845,6 +1962,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print_catalog(args.json)
         elif args.command == "run":
             run_selection(args)
+        elif args.command == "resume":
+            resume_run(args.run_dir)
         elif args.command == "report":
             build_reports(args.run_dir.expanduser().resolve())
             print(f"tables: {args.run_dir.expanduser().resolve() / 'tables'}")

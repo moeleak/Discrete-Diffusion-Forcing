@@ -164,6 +164,52 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
+def test_resume_reuses_complete_model_predictions(tmp_path):
+    sample_ids = ["sample-a", "sample-b"]
+    result_dir = tmp_path / "arm"
+    write_scores(
+        result_dir / "model",
+        sample_ids,
+        ssr=0.25,
+        resident=75.0,
+        dense=100.0,
+    )
+    record = {
+        "raw_output": "model",
+        "final_output": "fused",
+        "result_dir": str(result_dir),
+        "environment": {},
+    }
+
+    assert MODULE.reuse_completed_model_output(record, sample_ids)
+    assert record["environment"] == {
+        "RUN_MODEL": "0",
+        "MODEL_OUTPUT": str((result_dir / "model").resolve()),
+    }
+    assert record["resume_reused_model_output"] == str(
+        (result_dir / "model").resolve()
+    )
+
+
+def test_resume_does_not_reuse_incomplete_model_predictions(tmp_path):
+    record = {
+        "raw_output": "model",
+        "final_output": "fused",
+        "result_dir": str(tmp_path / "arm"),
+        "environment": {},
+    }
+
+    assert not MODULE.reuse_completed_model_output(record, ["sample-a"])
+    assert record["environment"] == {}
+
+
+def test_resume_cli_accepts_existing_run_directory(tmp_path):
+    args = MODULE.parse_args(["resume", str(tmp_path)])
+
+    assert args.command == "resume"
+    assert args.run_dir == tmp_path
+
+
 def test_catalog_resolves_all_thirteen_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 

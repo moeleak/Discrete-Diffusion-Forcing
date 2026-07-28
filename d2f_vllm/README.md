@@ -110,6 +110,11 @@ python D2F-eval/run_gui_benchmarks.py run deployment \
 # executed once, but a later invocation always creates a fresh run.
 python D2F-eval/run_gui_benchmarks.py run all \
   --gpu 0 --limit 100
+
+# Resume after an interrupted model or OCR stage. Complete model predictions
+# are validated and reused instead of being generated again.
+python D2F-eval/run_gui_benchmarks.py resume \
+  /home/ma-user/work/LLaDA-o/results/gui-benchmarks/<run-id>
 ```
 
 The predefined suites are:
