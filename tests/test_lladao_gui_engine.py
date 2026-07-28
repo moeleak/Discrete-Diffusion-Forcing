@@ -737,6 +737,12 @@ def test_image_kv_retrieval_config_rejects_token_eviction_modes():
         ).score_mode
         == "causal_self_information"
     )
+    assert (
+        LLaDAOGuiKVRetrievalConfig(
+            score_mode="causal_masked_self_information"
+        ).score_mode
+        == "causal_masked_self_information"
+    )
     with pytest.raises(ValueError, match="causal_self_information"):
         LLaDAOGuiKVRetrievalConfig(score_mode="per_head_eviction")
     with pytest.raises(ValueError, match="non-negative"):
@@ -778,7 +784,128 @@ def test_image_kv_retrieval_dispatches_legacy_causal_ablation():
     assert selected == [1]
     assert scores == {0: 0.1, 1: 0.9}
     assert candidates == 2
-    assert score_batches == 2
+    assert score_batches == 4
+    assert packed is False
+
+
+def test_causal_masked_scorer_uses_same_position_targets():
+    from types import SimpleNamespace
+
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        LLaDAOGuiKVRetrievalConfig,
+    )
+
+    allocated = []
+    released = []
+    image_calls = []
+    query_calls = []
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    engine.kv_retrieval = LLaDAOGuiKVRetrievalConfig(
+        score_mode="causal_masked_self_information",
+        mask_rounds=2,
+    )
+    engine.mask_token_id = 99
+    engine.kv_cache_capacity = 100
+    engine.page_size = 8
+    engine._prefix_cache = SimpleNamespace(
+        allocate_pages=lambda count: allocated.append(count) or [4],
+        release_pages=lambda pages: released.append(list(pages)),
+    )
+    engine._ids_tensor = lambda ids: torch.tensor(ids, dtype=torch.long)
+
+    def fake_image_forward(prefix, pages, indices):
+        del prefix
+        image_calls.append((list(pages), list(indices)))
+        return 2
+
+    def fake_query_forward(
+        ids,
+        positions,
+        *,
+        context_len,
+        page_ids,
+        start_token,
+        need_kv_cache_store,
+    ):
+        query_calls.append(
+            (
+                tuple(ids),
+                tuple(positions),
+                context_len,
+                list(page_ids),
+                start_token,
+                need_kv_cache_store,
+            )
+        )
+        logits = torch.zeros(len(ids), 128)
+        clean = (100, 10, 11, 12, 101)
+        for index, token_id in enumerate(ids):
+            if token_id == 99:
+                logits[index, clean[index]] = 20.0
+        return logits
+
+    engine._forward_image_spans = fake_image_forward
+    engine._forward_append_tokens_causal_paged = fake_query_forward
+    prefix = SimpleNamespace(
+        image_spans=[SimpleNamespace(token_start=0, token_end=2)]
+    )
+    score = engine._score_image_span_causal_masked_self_information(
+        prefix,
+        0,
+        [100, 10, 11, 12, 101],
+        [20, 21, 22, 23, 24],
+    )
+
+    assert score > -0.001
+    assert allocated == [1]
+    assert released == [[4]]
+    assert image_calls == [([4], [0])]
+    assert [call[0] for call in query_calls] == [
+        (100, 99, 11, 99, 101),
+        (100, 10, 99, 12, 101),
+    ]
+    assert all(call[1] == (20, 21, 22, 23, 24) for call in query_calls)
+    assert all(call[2:] == (2, [4], 2, False) for call in query_calls)
+
+
+def test_image_kv_retrieval_dispatches_controlled_causal_masked_ablation():
+    from types import SimpleNamespace
+
+    from d2f_vllm.lladao_gui_engine import (
+        LLaDAOGuiD2FEngine,
+        LLaDAOGuiKVRetrievalConfig,
+    )
+
+    engine = object.__new__(LLaDAOGuiD2FEngine)
+    engine.mask_token_id = 99
+    engine.kv_retrieval = LLaDAOGuiKVRetrievalConfig(
+        topk_images=1,
+        score_mode="causal_masked_self_information",
+        mask_rounds=2,
+        keep_overview=False,
+    )
+    engine._score_image_span_masked_self_information = (
+        lambda *args: pytest.fail("bidirectional scorer was selected")
+    )
+    engine._score_image_span_causal_self_information = (
+        lambda *args: pytest.fail("legacy scorer was selected")
+    )
+    engine._score_image_span_causal_masked_self_information = (
+        lambda prefix, index, query_ids, query_positions: [0.1, 0.9][index]
+    )
+    selected, scores, candidates, score_batches, packed = (
+        engine._select_retrieved_image_spans(
+            SimpleNamespace(image_spans=[object(), object()]),
+            has_overview=False,
+            query_ids=[100, 10, 11, 12, 101],
+            query_positions=[7, 8, 9, 10, 11],
+        )
+    )
+    assert selected == [1]
+    assert scores == {0: 0.1, 1: 0.9}
+    assert candidates == 2
+    assert score_batches == 6
     assert packed is False
 
 

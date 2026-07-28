@@ -155,12 +155,14 @@ def parse_args() -> argparse.Namespace:
         "--kv-retrieval-score-mode",
         choices=(
             "masked_self_information",
+            "causal_masked_self_information",
             "causal_self_information",
         ),
         default="masked_self_information",
         help=(
-            "whole-image retrieval scorer; causal_self_information is "
-            "retained only for controlled legacy ablations"
+            "whole-image retrieval scorer; causal_masked_self_information "
+            "is the one-way attention control, while "
+            "causal_self_information is the retired clear-query legacy proxy"
         ),
     )
     parser.add_argument(
@@ -843,7 +845,11 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "kv_retrieval_score_mode": args.kv_retrieval_score_mode,
         "kv_retrieval_mask_rounds": (
             args.kv_retrieval_mask_rounds
-            if args.kv_retrieval_score_mode == "masked_self_information"
+            if args.kv_retrieval_score_mode
+            in {
+                "masked_self_information",
+                "causal_masked_self_information",
+            }
             else 0
         ),
         "kv_retrieval_packed_scoring": (

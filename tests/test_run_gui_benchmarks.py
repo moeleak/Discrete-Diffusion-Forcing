@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_seven_suites_without_duplicate_arms():
+def test_catalog_resolves_all_eight_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -175,8 +175,9 @@ def test_catalog_resolves_all_seven_suites_without_duplicate_arms():
         "tile-size-ablation",
         "kv-retrieval-scoring-ablation",
         "kv-retrieval-packing-ablation",
+        "kv-retrieval-attention-ablation",
     ]
-    assert len(selection.arms) == 17
+    assert len(selection.arms) == 18
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -267,6 +268,44 @@ def test_kv_retrieval_packing_ablation_changes_only_batching():
     ) == "0"
     assert packed_environment.pop("KV_RETRIEVAL_PACKED_SCORING") == "1"
     assert sequential_environment == packed_environment
+
+
+def test_kv_retrieval_attention_ablation_changes_only_attention_mode():
+    selection = MODULE.resolve_selection("kv-retrieval-attention-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-causal-masked-ocr", "long100"),
+        ("yarn128k-kv-top4-sequential-ocr", "long100"),
+    )
+    causal = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-causal-masked-ocr"
+    ]
+    bidirectional = MODULE.BENCHMARKS[
+        "yarn128k-kv-top4-sequential-ocr"
+    ]
+    assert causal.launcher == bidirectional.launcher
+    assert causal.dataset == bidirectional.dataset
+    assert causal.input_processing == bidirectional.input_processing
+    assert causal.rope == bidirectional.rope
+    assert causal.max_context == bidirectional.max_context
+    assert causal.position_mode == bidirectional.position_mode
+    assert causal.crop == bidirectional.crop
+    assert causal.overview == bidirectional.overview
+    assert causal.truncation == bidirectional.truncation
+    assert causal.ocr == bidirectional.ocr
+    assert causal.retrieval_query == bidirectional.retrieval_query
+    assert causal.block_size == bidirectional.block_size
+    assert causal.full_page_tile_size == bidirectional.full_page_tile_size
+    causal_environment = dict(causal.environment)
+    bidirectional_environment = dict(bidirectional.environment)
+    assert causal_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "causal_masked_self_information"
+    )
+    assert bidirectional_environment.pop("KV_RETRIEVAL_SCORE_MODE") == (
+        "masked_self_information"
+    )
+    assert causal_environment == bidirectional_environment
+    assert causal_environment["KV_RETRIEVAL_PACKED_SCORING"] == "0"
 
 
 def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(

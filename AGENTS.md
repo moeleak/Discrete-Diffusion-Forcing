@@ -28,3 +28,12 @@
   on one GPU. The legacy causal scorer is ablation-only; the default runtime
   remains bidirectional masked scoring. Audit target-tile recall only after
   inference from ground-truth boxes.
+- A KV-retrieval attention-direction ablation must use the fixed first 100
+  ordered long-page sample IDs and keep the image tiles, overview,
+  operation-only query token IDs and positions, complementary corruption
+  masks, same-position targets, mask rounds, Top-K, checkpoint,
+  YaRN/position policy, prompt, seed, decoding, OCR, sequential scoring, and
+  disabled token/head KV compression identical. Only the query attention
+  topology may differ: causal masked query versus fully bidirectional masked
+  image-query scoring. Do not use the legacy clear-query next-token scorer as
+  either arm of this controlled comparison.

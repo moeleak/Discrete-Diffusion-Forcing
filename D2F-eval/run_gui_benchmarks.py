@@ -401,6 +401,26 @@ BENCHMARKS["yarn128k-kv-top4-sequential-ocr"] = replace(
     ),
 )
 
+BENCHMARKS["yarn128k-kv-top4-causal-masked-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-sequential-ocr"],
+    name="yarn128k-kv-top4-causal-masked-ocr",
+    description=(
+        "YaRN 128K with causal masked-query Top-4 image KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="4",
+        KV_RETRIEVAL_SCORE_MODE="causal_masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+    ),
+    kv_policy=(
+        "whole-image Top-4 retrieval; causal masked same-position scoring; "
+        "compression off"
+    ),
+)
+
 for tile_size in (686, 490):
     name = f"yarn128k-ocr-tile{tile_size}"
     BENCHMARKS[name] = replace(
@@ -483,6 +503,17 @@ SUITES = {
         arms=(
             ("yarn128k-kv-top4-sequential-ocr", "long100"),
             ("yarn128k-kv-top4-ocr", "long100"),
+        ),
+    ),
+    "kv-retrieval-attention-ablation": SuiteSpec(
+        name="kv-retrieval-attention-ablation",
+        description=(
+            "Causal versus bidirectional attention with identical masked "
+            "queries and same-position targets"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-causal-masked-ocr", "long100"),
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
         ),
     ),
 }
@@ -1100,6 +1131,10 @@ def default_run_id(target: str) -> str:
 def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
     environment = dict(spec.environment)
     score_mode = environment.get("KV_RETRIEVAL_SCORE_MODE")
+    masked_score_modes = {
+        "masked_self_information",
+        "causal_masked_self_information",
+    }
     return {
         "input_processing": spec.input_processing,
         "rope": spec.rope,
@@ -1114,7 +1149,7 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         "retrieval_score_mode": score_mode or "disabled",
         "retrieval_mask_rounds": (
             int(environment["KV_RETRIEVAL_MASK_ROUNDS"])
-            if score_mode == "masked_self_information"
+            if score_mode in masked_score_modes
             else 0
         ),
         "retrieval_packed_scoring": (
@@ -1124,7 +1159,7 @@ def protocol_dict(spec: BenchmarkSpec) -> dict[str, Any]:
         ),
         "retrieval_max_batch_tokens": (
             int(environment.get("KV_RETRIEVAL_MAX_BATCH_TOKENS", "65536"))
-            if score_mode == "masked_self_information"
+            if score_mode in masked_score_modes
             else 0
         ),
         "retrieval_topk_images": (
@@ -1458,7 +1493,7 @@ def print_catalog(as_json: bool) -> None:
             for name, suite in SUITES.items()
         },
         "special": {
-            "all": "run all seven suites, deduplicating identical arms"
+            "all": "run all eight suites, deduplicating identical arms"
         },
     }
     if as_json:
@@ -1472,7 +1507,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all seven suites")
+    print("\n  all                            run all eight suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

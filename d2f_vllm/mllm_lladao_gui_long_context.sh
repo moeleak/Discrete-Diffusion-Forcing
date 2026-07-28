@@ -49,11 +49,14 @@ if [[ "$KV_CACHE_RETRIEVAL" == "1" ]]; then
     masked_self_information)
       RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-masked${KV_RETRIEVAL_MASK_ROUNDS}-${SCORING_BATCH_TAG}"
       ;;
+    causal_masked_self_information)
+      RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causalmasked${KV_RETRIEVAL_MASK_ROUNDS}"
+      ;;
     causal_self_information)
       RETRIEVAL_TAG="kvretrieve${KV_RETRIEVAL_TOPK_IMAGES}-causal"
       ;;
     *)
-      echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information or causal_self_information" >&2
+      echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information, causal_masked_self_information, or causal_self_information" >&2
       exit 2
       ;;
   esac
@@ -73,9 +76,10 @@ if ! [[ "$KV_RETRIEVAL_TOPK_IMAGES" =~ ^[0-9]+$ ]]; then
 fi
 if [[
   "$KV_RETRIEVAL_SCORE_MODE" != "masked_self_information"
+  && "$KV_RETRIEVAL_SCORE_MODE" != "causal_masked_self_information"
   && "$KV_RETRIEVAL_SCORE_MODE" != "causal_self_information"
 ]]; then
-  echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information or causal_self_information" >&2
+  echo "KV_RETRIEVAL_SCORE_MODE must be masked_self_information, causal_masked_self_information, or causal_self_information" >&2
   exit 2
 fi
 if ! [[ "$KV_RETRIEVAL_MASK_ROUNDS" =~ ^[1-9][0-9]*$ ]]; then

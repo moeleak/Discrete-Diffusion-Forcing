@@ -81,10 +81,12 @@ class LLaDAOGuiKVRetrievalConfig:
             raise ValueError("topk_images must be non-negative")
         if self.score_mode not in {
             "masked_self_information",
+            "causal_masked_self_information",
             "causal_self_information",
         }:
             raise ValueError(
                 "score_mode must be one of: masked_self_information, "
+                "causal_masked_self_information, "
                 "causal_self_information"
             )
         if self.mask_rounds <= 0:
@@ -333,7 +335,7 @@ def build_causal_append_attention_mask(
     *,
     device: torch.device,
 ) -> torch.Tensor:
-    """Let a legacy scoring query attend context and its causal prefix."""
+    """Let a scoring query attend stored context and its causal prefix."""
 
     if context_len < 0 or active_len <= 0:
         raise ValueError("context_len must be non-negative and active_len positive")
@@ -804,7 +806,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         page_ids: list[int],
         need_kv_cache_store: bool,
     ) -> None:
-        """Configure the retired next-token scorer for controlled ablations."""
+        """Configure one-way scoring against a stored visual prefix."""
 
         device = torch.device("cuda", torch.cuda.current_device())
         slot_mapping = self._range_slot_mapping(
@@ -1364,6 +1366,83 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
         finally:
             self._prefix_cache.release_pages(page_ids)
 
+    def _score_image_span_causal_masked_self_information(
+        self,
+        prefix: LLaDAOGuiPrefix,
+        span_index: int,
+        query_ids: Sequence[int],
+        query_positions: Sequence[int],
+    ) -> float:
+        """Score masked same-position targets with one-way query attention.
+
+        This is the controlled counterpart to bidirectional masked scoring:
+        both modes use the same corrupted queries, targets, positions, and CE.
+        Only the attention topology differs.  Image tokens are encoded
+        bidirectionally once; each query token can attend the image and its
+        causal query prefix, but neither future query tokens nor query-to-image
+        feedback are visible.
+        """
+
+        span = prefix.image_spans[span_index]
+        span_len = span.token_end - span.token_start
+        scoring_len = span_len + len(query_ids)
+        if scoring_len > self.kv_cache_capacity:
+            raise ValueError(
+                f"retrieval scoring length {scoring_len} exceeds "
+                f"kv_cache_capacity={self.kv_cache_capacity}"
+            )
+        variants = build_complementary_masked_queries(
+            query_ids,
+            self.mask_token_id,
+            mask_rounds=self.kv_retrieval.mask_rounds,
+        )
+        if not variants:
+            return float("-inf")
+        page_ids = self._prefix_cache.allocate_pages(
+            math.ceil(scoring_len / self.page_size)
+        )
+        try:
+            cached = self._forward_image_spans(
+                prefix,
+                page_ids,
+                [span_index],
+            )
+            total_nll: torch.Tensor | None = None
+            scored_tokens = 0
+            for variant in variants:
+                logits = self._forward_append_tokens_causal_paged(
+                    variant.token_ids,
+                    query_positions,
+                    context_len=cached,
+                    page_ids=page_ids,
+                    start_token=cached,
+                    need_kv_cache_store=False,
+                )
+                target_indices = torch.tensor(
+                    variant.target_indices,
+                    dtype=torch.long,
+                    device=logits.device,
+                )
+                target_logits = logits.index_select(0, target_indices)
+                labels = self._ids_tensor(variant.target_ids)
+                round_nll = F.cross_entropy(
+                    target_logits.float(),
+                    labels,
+                    reduction="sum",
+                )
+                total_nll = (
+                    round_nll
+                    if total_nll is None
+                    else total_nll + round_nll
+                )
+                scored_tokens += len(variant.target_ids)
+            if total_nll is None or scored_tokens <= 0:
+                return float("-inf")
+            score = float(-(total_nll / scored_tokens).item())
+            return score if math.isfinite(score) else float("-inf")
+        finally:
+            self._prefix_cache.release_pages(page_ids)
+
     def _select_retrieved_image_spans(
         self,
         prefix: LLaDAOGuiPrefix,
@@ -1400,6 +1479,27 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
             )
             for index, score in masked_scores.items():
                 scores[index] = score
+        elif (
+            self.kv_retrieval.score_mode
+            == "causal_masked_self_information"
+        ):
+            for index in candidates:
+                scores[index] = (
+                    self._score_image_span_causal_masked_self_information(
+                        prefix,
+                        index,
+                        query_ids,
+                        query_positions,
+                    )
+                )
+            variant_count = len(
+                build_complementary_masked_queries(
+                    query_ids,
+                    self.mask_token_id,
+                    mask_rounds=self.kv_retrieval.mask_rounds,
+                )
+            )
+            score_batches = len(candidates) * (1 + variant_count)
         else:
             for index in candidates:
                 scores[index] = self._score_image_span_causal_self_information(
@@ -1408,7 +1508,7 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                     query_ids,
                     query_positions,
                 )
-            score_batches = len(candidates)
+            score_batches = 2 * len(candidates)
         selected = select_top_image_spans(
             scores,
             candidates,
@@ -1946,7 +2046,10 @@ class LLaDAOGuiD2FEngine(FastDLLMDreamEngine):
                     if (
                         self.kv_retrieval.enabled
                         and self.kv_retrieval.score_mode
-                        == "masked_self_information"
+                        in {
+                            "masked_self_information",
+                            "causal_masked_self_information",
+                        }
                     )
                     else 0
                 ),
