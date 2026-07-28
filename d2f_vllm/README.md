@@ -208,6 +208,33 @@ size 16, the 65,536-token resident-KV capacity, and disabled KV compression
 fixed. Only the 14px-aligned full-page tile edge changes from 980 to 686 to
 490 pixels.
 
+The clean Clariden run on revision `c3e234f` used the fixed first 100
+long-page samples with ordered sample-ID SHA-256
+`8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
+All three arms completed without inference errors:
+
+| Tile edge | Candidates | Target-tile recall | Raw SSR | OCR SSR | Mean / P95 latency | Retrieval latency | Resident / dense KV | KV reduction | Peak allocated |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **980px** | 10.86 | **90%** | 8% | **76%** | 3.650 / 4.718 s | 1.49 s | 15,383 / 33,483 | 54.06% | 54.62 GiB |
+| 686px | 15.22 | 74% | **11%** | 75% | 3.568 / 5.352 s | 1.37 s | 10,482 / 33,492 | 68.70% | **54.51 GiB** |
+| 490px | 30.96 | 41% | 8% | 72% | **3.417 / 4.693 s** | **1.30 s** | **6,055** / 33,524 | **81.94%** | 54.63 GiB |
+
+With Top-4 fixed, smaller tiles cover less of the page and make retrieval
+choose from more candidates. Relative to 980px, 686px saves 2.25% mean
+latency but loses 16 target-recall points and one final-SSR point; 490px saves
+6.39% mean latency but loses 49 recall points and four final-SSR points.
+Packed scoring holds the mean score-batch count at 2.78 for all three sizes,
+so smaller tiles reduce resident KV but do not reduce the dominant model or
+preallocated-cache memory. Keep 980px as the quality-preserving default for
+Top-4. Testing smaller tiles with proportionally larger Top-K is a separate
+coverage-policy ablation, not a tile-size-only comparison.
+
+The complete run is under:
+
+```text
+$SCRATCH/runs/d2f-kv-retrieval-clariden/tile-size-fixed100-c3e234f
+```
+
 The validated 100-sample run used ordered sample-ID SHA-256
 `8d54d1912ae7ab966bd341df46488c843e54a0f4c16c6a898d8a5bec7d89bc4f`.
 All arms completed without inference errors:
