@@ -44,3 +44,10 @@ def test_flash_loader_falls_back_to_native_flash_attn(monkeypatch):
     )
 
     assert module.flash_attn_varlen_func is sentinel
+
+
+def test_triton_kernels_avoid_post_3_1_loop_keyword():
+    ops = ROOT / "layers" / "attention" / "ops"
+    for name in ("kv_cache_kernels.py", "prefix_prefill.py"):
+        source = (ops / name).read_text(encoding="utf-8")
+        assert "loop_unroll_factor=" not in source

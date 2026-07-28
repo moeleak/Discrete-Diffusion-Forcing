@@ -249,7 +249,12 @@ def load_kvcache_kernel_kv(k_cache_ptr, v_cache_ptr,
         offs_kv_new_seq = tl.arange(0, DIFFUSION_BLOCK_SIZE)
         offs_kv_new_hdim = tl.arange(0, HEAD_DIM)
         
-        for diff_blk_idx in tl.range(tl.cdiv(active_seqlen, DIFFUSION_BLOCK_SIZE), loop_unroll_factor=KV_LOAD_UNROLL_FACTOR):
+        # Triton 3.1 (the NVIDIA 25.01 container on Clariden) does not
+        # support the newer loop_unroll_factor keyword.  The factor is only
+        # a compiler hint; omitting it preserves the loop semantics.
+        for diff_blk_idx in tl.range(
+            tl.cdiv(active_seqlen, DIFFUSION_BLOCK_SIZE)
+        ):
             off_diff_blk = diff_blk_idx * DIFFUSION_BLOCK_SIZE
             active_mask = off_diff_blk + offs_kv_new_seq[None, :] < active_seqlen
             cur_kv_new_start_idx = kv_new_start_idx + off_diff_blk

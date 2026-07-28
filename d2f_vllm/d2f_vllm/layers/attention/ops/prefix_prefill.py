@@ -94,7 +94,7 @@ def _fwd_kernel_d2f(Q, K, V, Mask,
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
     # compute query against context (no causal mask here)
-    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache):
+    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE)
         # ---- compute qk ----
         bn = tl.load(B_Loc + cur_batch * stride_b_loc_b + (start_n // BLOCK_SIZE) * stride_b_loc_s)
@@ -179,7 +179,7 @@ def _fwd_kernel_d2f(Q, K, V, Mask,
         self_loop_end = block_mask * tl.cdiv(cur_batch_query_len, BLOCK_N) * BLOCK_N
     else:
         self_loop_end = block_mask * (start_m + 1) * BLOCK_M
-    for start_n in tl.range(0, self_loop_end, BLOCK_N, loop_unroll_factor=num_unroll_request):
+    for start_n in tl.range(0, self_loop_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # ---- compute qk ----
         k = tl.load(k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
@@ -304,8 +304,7 @@ def _fwd_kernel(Q, K, V,
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
     # compute query against context (no causal mask here)
-    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE, \
-                            loop_unroll_factor=num_unroll_cache):
+    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE)
         # -- compute qk ----
         bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
@@ -396,7 +395,11 @@ def _fwd_kernel(Q, K, V,
     block_mask = tl.where(block_start_loc < cur_batch_query_len, 1, 0)
 
     # compute query against itself (with causal mask)
-    for start_n in tl.range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N, loop_unroll_factor=num_unroll_request):
+    for start_n in tl.range(
+        0,
+        block_mask * (start_m + 1) * BLOCK_M,
+        BLOCK_N,
+    ):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(k_ptrs +
