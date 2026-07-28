@@ -13,8 +13,10 @@
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
+try:
+    from vllm import _custom_ops as ops
+except ImportError:
+    ops = None
 try:
     from vllm.platforms.rocm import use_rocm_custom_paged_attention
 except ImportError:
@@ -27,6 +29,7 @@ except ImportError:
     import triton.language as tl
 
 from d2f_vllm.layers.attention.ops.prefix_prefill import context_attention_fwd
+from d2f_vllm.utils.platform import current_platform
 
 
 @triton.jit
@@ -304,6 +307,10 @@ def chunked_prefill_paged_decode(
                                                  max_seq_len, sliding_window,
                                                  kv_cache_dtype, alibi_slopes)
     if use_custom:
+        if ops is None:
+            raise RuntimeError(
+                "ROCm custom paged attention requires vLLM custom ops"
+            )
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
                               _PARTITION_SIZE_ROCM)

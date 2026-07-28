@@ -26,7 +26,7 @@ Not currently supported:
 
 import torch
 
-from vllm.platforms import current_platform
+from d2f_vllm.utils.platform import current_platform
 try:
     from vllm.triton_utils import tl, triton
 except ImportError:
@@ -35,7 +35,10 @@ except ImportError:
 
 # Avoid misleading ROCm warning.
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1x
+    try:
+        from vllm.platforms.rocm import on_gfx1x
+    except ImportError:
+        on_gfx1x = lambda *args, **kwargs: False
 else:
     on_gfx1x = lambda *args, **kwargs: False
 

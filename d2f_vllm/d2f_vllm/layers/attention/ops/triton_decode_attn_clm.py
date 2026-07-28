@@ -35,7 +35,7 @@ It supports page size >= 1.
 import torch
 import logging
 
-from vllm.platforms import current_platform
+from d2f_vllm.utils.platform import current_platform
 try:
     from vllm.triton_utils import tl, triton
 except ImportError:

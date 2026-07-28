@@ -6,7 +6,17 @@ import torch.distributions as dists
 
 from typing import List, Dict
 from dataclasses import dataclass
-from easydict import EasyDict as edict
+try:
+    from easydict import EasyDict as edict
+except ImportError:
+    class edict(dict):
+        """Dependency-free subset used by the scheduler's mapping outputs."""
+
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
 
 from d2f_vllm.config import Config
 from d2f_vllm.utils.context import get_context_diffusion_lm
