@@ -421,6 +421,28 @@ BENCHMARKS["yarn128k-kv-top4-causal-masked-ocr"] = replace(
     ),
 )
 
+BENCHMARKS["yarn128k-kv-top8-sequential-ocr"] = replace(
+    BENCHMARKS["yarn128k-kv-top4-sequential-ocr"],
+    name="yarn128k-kv-top8-sequential-ocr",
+    description=(
+        "YaRN 128K with sequential bidirectional masked Top-8 image "
+        "KV retrieval"
+    ),
+    environment=pairs(
+        KV_CACHE_CAPACITY="65536",
+        KV_RETRIEVAL_TOPK_IMAGES="8",
+        KV_RETRIEVAL_SCORE_MODE="masked_self_information",
+        KV_RETRIEVAL_MASK_ROUNDS="2",
+        KV_RETRIEVAL_PACKED_SCORING="0",
+        KV_RETRIEVAL_MAX_BATCH_TOKENS="65536",
+    ),
+    input_processing="Top-8 exact 980px tiles + forced overview",
+    kv_policy=(
+        "whole-image Top-8 retrieval; sequential bidirectional masked "
+        "scoring; compression off"
+    ),
+)
+
 for tile_size in (686, 490):
     name = f"yarn128k-ocr-tile{tile_size}"
     BENCHMARKS[name] = replace(
@@ -514,6 +536,17 @@ SUITES = {
         arms=(
             ("yarn128k-kv-top4-causal-masked-ocr", "long100"),
             ("yarn128k-kv-top4-sequential-ocr", "long100"),
+        ),
+    ),
+    "kv-retrieval-topk-ablation": SuiteSpec(
+        name="kv-retrieval-topk-ablation",
+        description=(
+            "Bidirectional masked retrieval retaining Top-4 versus Top-8 "
+            "source tiles"
+        ),
+        arms=(
+            ("yarn128k-kv-top4-sequential-ocr", "long100"),
+            ("yarn128k-kv-top8-sequential-ocr", "long100"),
         ),
     ),
 }
@@ -1493,7 +1526,7 @@ def print_catalog(as_json: bool) -> None:
             for name, suite in SUITES.items()
         },
         "special": {
-            "all": "run all eight suites, deduplicating identical arms"
+            "all": "run all nine suites, deduplicating identical arms"
         },
     }
     if as_json:
@@ -1507,7 +1540,7 @@ def print_catalog(as_json: bool) -> None:
         values = ", ".join(benchmark for benchmark, _ in suite.arms)
         print(f"  {name:<30} {suite.description}")
         print(f"  {'':<30} {values}")
-    print("\n  all                            run all eight suites")
+    print("\n  all                            run all nine suites")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

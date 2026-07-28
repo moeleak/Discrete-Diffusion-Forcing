@@ -164,7 +164,7 @@ def make_completed_run(tmp_path: Path) -> tuple[Path, dict]:
     return run_dir, arm
 
 
-def test_catalog_resolves_all_eight_suites_without_duplicate_arms():
+def test_catalog_resolves_all_nine_suites_without_duplicate_arms():
     selection = MODULE.resolve_selection("all")
 
     assert [name for name, _ in selection.groups] == [
@@ -176,8 +176,9 @@ def test_catalog_resolves_all_eight_suites_without_duplicate_arms():
         "kv-retrieval-scoring-ablation",
         "kv-retrieval-packing-ablation",
         "kv-retrieval-attention-ablation",
+        "kv-retrieval-topk-ablation",
     ]
-    assert len(selection.arms) == 18
+    assert len(selection.arms) == 19
     assert len(selection.arms) == len(set(selection.arms))
 
 
@@ -306,6 +307,34 @@ def test_kv_retrieval_attention_ablation_changes_only_attention_mode():
     )
     assert causal_environment == bidirectional_environment
     assert causal_environment["KV_RETRIEVAL_PACKED_SCORING"] == "0"
+
+
+def test_kv_retrieval_topk_ablation_changes_only_retained_tile_count():
+    selection = MODULE.resolve_selection("kv-retrieval-topk-ablation")
+
+    assert selection.arms == (
+        ("yarn128k-kv-top4-sequential-ocr", "long100"),
+        ("yarn128k-kv-top8-sequential-ocr", "long100"),
+    )
+    top4 = MODULE.BENCHMARKS["yarn128k-kv-top4-sequential-ocr"]
+    top8 = MODULE.BENCHMARKS["yarn128k-kv-top8-sequential-ocr"]
+    assert top4.launcher == top8.launcher
+    assert top4.dataset == top8.dataset
+    assert top4.rope == top8.rope
+    assert top4.max_context == top8.max_context
+    assert top4.position_mode == top8.position_mode
+    assert top4.crop == top8.crop
+    assert top4.overview == top8.overview
+    assert top4.truncation == top8.truncation
+    assert top4.ocr == top8.ocr
+    assert top4.retrieval_query == top8.retrieval_query
+    assert top4.block_size == top8.block_size
+    assert top4.full_page_tile_size == top8.full_page_tile_size
+    top4_environment = dict(top4.environment)
+    top8_environment = dict(top8.environment)
+    assert top4_environment.pop("KV_RETRIEVAL_TOPK_IMAGES") == "4"
+    assert top8_environment.pop("KV_RETRIEVAL_TOPK_IMAGES") == "8"
+    assert top4_environment == top8_environment
 
 
 def test_retrieval_target_tile_recall_uses_ground_truth_only_posthoc(

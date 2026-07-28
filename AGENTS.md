@@ -37,3 +37,10 @@
   topology may differ: causal masked query versus fully bidirectional masked
   image-query scoring. Do not use the legacy clear-query next-token scorer as
   either arm of this controlled comparison.
+- A KV-retrieval Top-K ablation must use the fixed first 100 ordered long-page
+  sample IDs and keep the bidirectional masked scorer, sequential scoring,
+  operation-only query, complementary masks, overview, checkpoint,
+  YaRN/position policy, image tile size, prompt, seed, decoding, OCR, resident
+  KV capacity, and disabled token/head KV compression identical. Only
+  `KV_RETRIEVAL_TOPK_IMAGES` may change; the forced overview is additional to
+  that source-tile count.
