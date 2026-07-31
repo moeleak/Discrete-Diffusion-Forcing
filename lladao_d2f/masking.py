@@ -6,6 +6,18 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
 
+FLEX_MASK_BLOCK_SIZE = 128
+
+
+def _padded_mask_length(total_length: int) -> int:
+    """Round metadata up to FlexAttention's block-mask evaluation grid."""
+    return (
+        (total_length + FLEX_MASK_BLOCK_SIZE - 1)
+        // FLEX_MASK_BLOCK_SIZE
+        * FLEX_MASK_BLOCK_SIZE
+    )
+
+
 def block_attention_allowed(
     query_position: int,
     key_position: int,
@@ -92,6 +104,15 @@ def create_training_block_mask(
         response_ends.extend([end] * sample_len)
 
     total_length = sum(map(int, sample_lens))
+    padded_length = _padded_mask_length(total_length)
+    metadata_padding = padded_length - total_length
+    # create_block_mask evaluates mask_mod over complete 128-token blocks even
+    # when Q_LEN/KV_LEN are not aligned.  Pad every indexed tensor so those
+    # speculative q/k indices are safe, then reject them with explicit bounds.
+    document_ids.extend([-1] * metadata_padding)
+    local_positions.extend([-1] * metadata_padding)
+    response_starts.extend([-1] * metadata_padding)
+    response_ends.extend([-1] * metadata_padding)
     doc = torch.tensor(document_ids, device=device, dtype=torch.int32)
     local = torch.tensor(local_positions, device=device, dtype=torch.int32)
     starts = torch.tensor(response_starts, device=device, dtype=torch.int32)
@@ -99,6 +120,8 @@ def create_training_block_mask(
 
     def mask_mod(batch, head, query_index, key_index):
         del batch, head
+        valid_query = query_index < total_length
+        valid_key = key_index < total_length
         same_document = doc[query_index] == doc[key_index]
         start = starts[query_index]
         end = ends[query_index]
@@ -115,7 +138,12 @@ def create_training_block_mask(
             key_prefix | (key_response & (key_block <= query_block))
         )
         prefix_allowed = query_prefix & key_prefix
-        return same_document & (no_response | prefix_allowed | response_allowed)
+        return (
+            valid_query
+            & valid_key
+            & same_document
+            & (no_response | prefix_allowed | response_allowed)
+        )
 
     return create_block_mask(
         mask_mod,
@@ -124,7 +152,7 @@ def create_training_block_mask(
         Q_LEN=total_length,
         KV_LEN=total_length,
         device=device,
-        BLOCK_SIZE=128,
+        BLOCK_SIZE=FLEX_MASK_BLOCK_SIZE,
         _compile=True,
     )
 
@@ -139,11 +167,15 @@ def create_full_document_mask(
     for document_id, sample_len in enumerate(sample_lens):
         document_ids.extend([document_id] * int(sample_len))
     total_length = sum(map(int, sample_lens))
+    padded_length = _padded_mask_length(total_length)
+    document_ids.extend([-1] * (padded_length - total_length))
     doc = torch.tensor(document_ids, device=device, dtype=torch.int32)
 
     def mask_mod(batch, head, query_index, key_index):
         del batch, head
-        return doc[query_index] == doc[key_index]
+        valid_query = query_index < total_length
+        valid_key = key_index < total_length
+        return valid_query & valid_key & (doc[query_index] == doc[key_index])
 
     return create_block_mask(
         mask_mod,
@@ -152,6 +184,6 @@ def create_full_document_mask(
         Q_LEN=total_length,
         KV_LEN=total_length,
         device=device,
-        BLOCK_SIZE=128,
+        BLOCK_SIZE=FLEX_MASK_BLOCK_SIZE,
         _compile=True,
     )

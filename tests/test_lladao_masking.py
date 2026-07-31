@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import pytest
 import torch
+from torch.nn.attention.flex_attention import create_mask
 
-from lladao_d2f.masking import block_attention_allowed, build_suffix_attention_bias
+from lladao_d2f.masking import (
+    block_attention_allowed,
+    build_suffix_attention_bias,
+    create_full_document_mask,
+    create_training_block_mask,
+)
 
 
 def test_reference_block_visibility() -> None:
@@ -47,3 +54,107 @@ def test_suffix_bias_validates_lengths() -> None:
         pass
     else:
         raise AssertionError("negative cache length should fail")
+
+
+def _assert_non_aligned_compiled_masks(device: str) -> None:
+    training_mask = create_training_block_mask(
+        [5],
+        [[(3, 2)]],
+        2,
+        num_heads=1,
+        device=device,
+    )
+    full_mask = create_full_document_mask([5], num_heads=1, device=device)
+
+    # FlexAttention represents the partially occupied block as one dense block.
+    assert tuple(training_mask.to_dense().shape) == (1, 1, 1, 1)
+    assert tuple(full_mask.to_dense().shape) == (1, 1, 1, 1)
+    assert bool(training_mask.to_dense().all())
+    assert bool(full_mask.to_dense().all())
+
+
+def test_compiled_masks_accept_non_aligned_length_on_cpu() -> None:
+    _assert_non_aligned_compiled_masks("cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_compiled_masks_accept_non_aligned_length_on_cuda() -> None:
+    _assert_non_aligned_compiled_masks("cuda")
+
+
+def _assert_padded_token_mask_matches_oracle(device: str) -> None:
+    sample_lens = [65, 64]
+    response_spans = [[(61, 4)], []]
+    total_length = sum(sample_lens)
+    padded_length = 256
+    num_heads = 2
+    training_mask = create_training_block_mask(
+        sample_lens,
+        response_spans,
+        2,
+        num_heads=num_heads,
+        device=device,
+    )
+    full_mask = create_full_document_mask(
+        sample_lens,
+        num_heads=num_heads,
+        device=device,
+    )
+    actual_training = create_mask(
+        training_mask.mask_mod,
+        B=1,
+        H=num_heads,
+        Q_LEN=padded_length,
+        KV_LEN=padded_length,
+        device=device,
+    )[0]
+    actual_full = create_mask(
+        full_mask.mask_mod,
+        B=1,
+        H=num_heads,
+        Q_LEN=padded_length,
+        KV_LEN=padded_length,
+        device=device,
+    )[0]
+
+    expected_training = torch.zeros(
+        (num_heads, padded_length, padded_length),
+        dtype=torch.bool,
+        device=device,
+    )
+    expected_full = torch.zeros_like(expected_training)
+    for query in range(total_length):
+        query_document = 0 if query < sample_lens[0] else 1
+        for key in range(total_length):
+            key_document = 0 if key < sample_lens[0] else 1
+            if query_document != key_document:
+                continue
+            expected_full[:, query, key] = True
+            if query_document == 1:
+                # Samples without a response use full-document visibility.
+                expected_training[:, query, key] = True
+            elif query < 61:
+                expected_training[:, query, key] = key < 61
+            else:
+                key_is_prefix = key < 61
+                key_is_response = 61 <= key < 65
+                prior_response_block = (key - 61) // 2 <= (query - 61) // 2
+                expected_training[:, query, key] = key_is_prefix or (
+                    key_is_response and prior_response_block
+                )
+
+    assert torch.equal(actual_training, expected_training)
+    assert torch.equal(actual_full, expected_full)
+    assert not bool(actual_training[:, total_length:, :].any())
+    assert not bool(actual_training[:, :, total_length:].any())
+    assert not bool(actual_full[:, total_length:, :].any())
+    assert not bool(actual_full[:, :, total_length:].any())
+
+
+def test_padded_token_masks_match_oracle_on_cpu() -> None:
+    _assert_padded_token_mask_matches_oracle("cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_padded_token_masks_match_oracle_on_cuda() -> None:
+    _assert_padded_token_mask_matches_oracle("cuda")
