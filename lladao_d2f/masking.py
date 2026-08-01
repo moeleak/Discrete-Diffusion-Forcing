@@ -117,11 +117,16 @@ def create_training_block_mask(
     local = torch.tensor(local_positions, device=device, dtype=torch.int32)
     starts = torch.tensor(response_starts, device=device, dtype=torch.int32)
     ends = torch.tensor(response_ends, device=device, dtype=torch.int32)
+    # Keep the exact, unpadded length out of the Python closure guards used by
+    # create_block_mask(_compile=True).  A Python integer here specializes the
+    # compiled helper once per batch length and eventually exhausts Dynamo's
+    # cache even when those lengths share the same 128-token compile bucket.
+    valid_length = torch.scalar_tensor(total_length, device=device, dtype=torch.int32)
 
     def mask_mod(batch, head, query_index, key_index):
         del batch, head
-        valid_query = query_index < total_length
-        valid_key = key_index < total_length
+        valid_query = query_index < valid_length
+        valid_key = key_index < valid_length
         same_document = doc[query_index] == doc[key_index]
         start = starts[query_index]
         end = ends[query_index]
@@ -170,11 +175,12 @@ def create_full_document_mask(
     padded_length = _padded_mask_length(total_length)
     document_ids.extend([-1] * (padded_length - total_length))
     doc = torch.tensor(document_ids, device=device, dtype=torch.int32)
+    valid_length = torch.scalar_tensor(total_length, device=device, dtype=torch.int32)
 
     def mask_mod(batch, head, query_index, key_index):
         del batch, head
-        valid_query = query_index < total_length
-        valid_key = key_index < total_length
+        valid_query = query_index < valid_length
+        valid_key = key_index < valid_length
         return valid_query & valid_key & (doc[query_index] == doc[key_index])
 
     return create_block_mask(

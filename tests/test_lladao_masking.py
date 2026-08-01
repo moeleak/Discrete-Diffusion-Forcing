@@ -158,3 +158,37 @@ def test_padded_token_masks_match_oracle_on_cpu() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_padded_token_masks_match_oracle_on_cuda() -> None:
     _assert_padded_token_mask_matches_oracle("cuda")
+
+
+def test_compiled_masks_reuse_exact_lengths_within_one_bucket() -> None:
+    """Changing valid lengths must not create one Dynamo graph per batch."""
+    import torch._dynamo
+
+    previous_cache_limit = torch._dynamo.config.cache_size_limit
+    previous_accumulated_limit = torch._dynamo.config.accumulated_cache_size_limit
+    torch._dynamo.reset()
+    torch._dynamo.config.cache_size_limit = 8
+    torch._dynamo.config.accumulated_cache_size_limit = 256
+    try:
+        # All ten exact lengths round to the same 256-token FlexAttention
+        # bucket. Capturing the exact length as a Python integer used to exceed
+        # this deliberately small cache limit before the loop completed.
+        for total_length in range(129, 139):
+            training_mask = create_training_block_mask(
+                [total_length],
+                [[(total_length - 2, 2)]],
+                2,
+                num_heads=1,
+                device="cpu",
+            )
+            full_mask = create_full_document_mask(
+                [total_length],
+                num_heads=1,
+                device="cpu",
+            )
+            assert tuple(training_mask.to_dense().shape) == (1, 1, 2, 2)
+            assert tuple(full_mask.to_dense().shape) == (1, 1, 2, 2)
+    finally:
+        torch._dynamo.reset()
+        torch._dynamo.config.cache_size_limit = previous_cache_limit
+        torch._dynamo.config.accumulated_cache_size_limit = previous_accumulated_limit
