@@ -44,3 +44,50 @@ def test_corruption_rejects_batches_without_supervised_responses() -> None:
         assert "no supervised" in str(exc)
     else:
         raise AssertionError("unsupervised batches should fail")
+
+
+def test_action_tokens_are_always_masked_without_biasing_d2f_weights() -> None:
+    mask_id = 999
+    action_index = 2
+    observed_forced_only = False
+    for seed in range(20):
+        torch.manual_seed(seed)
+        batch = {
+            "packed_text_ids": torch.tensor([10, 11, 12, 13, 14, 15]),
+            "packed_text_indexes": torch.arange(6),
+            "ce_loss_indexes": torch.arange(1, 6),
+            "packed_label_ids": torch.tensor([11, 12, 13, 14, 15]),
+            "ce_loss_weights": torch.ones(5),
+            "sample_lens": [6],
+            "d2f_response_spans": [[(0, 6)]],
+            "action_token_indexes": torch.tensor([action_index]),
+        }
+        result = rebuild_and_corrupt_responses(batch, mask_id=mask_id, block_size=16)
+        selected = result["ce_loss_indexes"].long()
+        action_offset = int((selected == action_index).nonzero().item())
+        assert result["packed_text_ids"][action_index].item() == mask_id
+        assert bool(result["action_ce_mask"][action_offset])
+        if result["ce_loss_weights"][action_offset].item() == 0:
+            observed_forced_only = True
+        else:
+            assert result["ce_loss_weights"][action_offset].item() >= 1
+    assert observed_forced_only
+
+
+def test_action_indexes_must_be_supervised_answer_tokens() -> None:
+    batch = {
+        "packed_text_ids": torch.tensor([10, 11, 12]),
+        "packed_text_indexes": torch.arange(3),
+        "ce_loss_indexes": torch.tensor([1, 2]),
+        "packed_label_ids": torch.tensor([11, 12]),
+        "ce_loss_weights": torch.ones(2),
+        "sample_lens": [3],
+        "d2f_response_spans": [[(0, 3)]],
+        "action_token_indexes": torch.tensor([0]),
+    }
+    try:
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+    except ValueError as exc:
+        assert "supervised answer" in str(exc)
+    else:
+        raise AssertionError("response BOS must not be accepted as an action token")

@@ -231,6 +231,44 @@ def adapter_disabled(model):
     return target.disable_adapter() if hasattr(target, "disable_adapter") else nullcontext()
 
 
+def combine_d2f_and_action_losses(
+    *,
+    distill: torch.Tensor,
+    hard_ce: torch.Tensor,
+    d2f_weights: torch.Tensor,
+    action_mask: torch.Tensor,
+    distill_weight: float,
+    hard_ce_weight: float,
+    action_ce_weight: float,
+    action_class_weight: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    if not (distill.shape == hard_ce.shape == d2f_weights.shape == action_mask.shape):
+        raise ValueError("token loss tensors must have identical shapes")
+    denominator = d2f_weights.sum()
+    if not bool(denominator > 0):
+        raise ValueError("D2F random-mask weights must have positive mass")
+    token_loss = distill_weight * distill + hard_ce_weight * hard_ce
+    d2f_loss = (token_loss * d2f_weights).sum() / denominator
+    weighted_distill = (distill * d2f_weights).sum() / denominator
+    weighted_hard_ce = (hard_ce * d2f_weights).sum() / denominator
+    if bool(action_mask.any()):
+        action_ce = hard_ce[action_mask].mean()
+        balanced_action_ce = action_ce * action_class_weight.float().reshape(())
+    else:
+        if action_ce_weight:
+            raise ValueError("action CE is enabled but the batch has no action tokens")
+        action_ce = hard_ce.new_zeros(())
+        balanced_action_ce = hard_ce.new_zeros(())
+    return {
+        "loss": d2f_loss + action_ce_weight * balanced_action_ce,
+        "d2f_loss": d2f_loss,
+        "distill_loss": weighted_distill,
+        "hard_ce_loss": weighted_hard_ce,
+        "action_ce_loss": action_ce,
+        "balanced_action_ce_loss": balanced_action_ce,
+    }
+
+
 class LLaDAOGuiD2FModel(nn.Module):
     """DDP-safe teacher/student wrapper around a single PEFT LLaDA-o model."""
 
@@ -242,6 +280,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         block_size: int = 16,
         distill_weight: float = 1.0,
         hard_ce_weight: float = 0.1,
+        action_ce_weight: float = 0.0,
     ):
         super().__init__()
         self.peft_model = peft_model
@@ -249,6 +288,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         self.block_size = block_size
         self.distill_weight = distill_weight
         self.hard_ce_weight = hard_ce_weight
+        self.action_ce_weight = action_ce_weight
 
     def forward(self, raw_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         batch = rebuild_and_corrupt_responses(
@@ -285,13 +325,26 @@ class LLaDAOGuiD2FModel(nn.Module):
             student_logits.float(), batch["packed_label_ids"].long(), reduction="none"
         )
         weights = batch["ce_loss_weights"].float()
-        token_loss = self.distill_weight * distill + self.hard_ce_weight * hard_ce
-        loss = (token_loss * weights).sum() / weights.sum().clamp_min(1e-8)
-        return {
-            "loss": loss,
-            "distill_loss": (distill * weights).sum() / weights.sum().clamp_min(1e-8),
-            "hard_ce_loss": (hard_ce * weights).sum() / weights.sum().clamp_min(1e-8),
+        action_mask = batch["action_ce_mask"].bool()
+        class_weight = batch.get("action_class_weight")
+        if class_weight is None:
+            class_weight = hard_ce.new_ones(())
+        metrics = combine_d2f_and_action_losses(
+            distill=distill,
+            hard_ce=hard_ce,
+            d2f_weights=weights,
+            action_mask=action_mask,
+            distill_weight=self.distill_weight,
+            hard_ce_weight=self.hard_ce_weight,
+            action_ce_weight=self.action_ce_weight,
+            action_class_weight=class_weight,
+        )
+        metrics.update({
             "masked_tokens": torch.tensor(
-                len(batch["packed_label_ids"]), device=loss.device, dtype=torch.long
+                len(batch["packed_label_ids"]), device=hard_ce.device, dtype=torch.long
             ),
-        }
+            "d2f_random_masked_tokens": (weights > 0).sum(),
+            "action_tokens": action_mask.sum(),
+            "action_class_weight": class_weight.float().reshape(()),
+        })
+        return metrics

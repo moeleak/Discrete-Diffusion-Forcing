@@ -35,6 +35,18 @@ def rebuild_and_corrupt_responses(
     if block_size <= 0:
         raise ValueError("block_size must be positive")
     packed_indexes: torch.Tensor = batch["packed_text_indexes"]
+    action_indexes = batch.get("action_token_indexes")
+    if action_indexes is None:
+        action_indexes = torch.empty(0, dtype=torch.long, device=packed_indexes.device)
+    else:
+        action_indexes = action_indexes.long()
+        if action_indexes.ndim != 1 or len(action_indexes) == 0:
+            raise ValueError("action token indexes must be one non-empty vector")
+        if len(torch.unique(action_indexes)) != len(action_indexes):
+            raise ValueError("action token indexes must be unique")
+        old_loss_indexes = batch["ce_loss_indexes"].long()
+        if not bool(torch.isin(action_indexes, old_loss_indexes).all()):
+            raise ValueError("action token indexes must be supervised answer tokens")
     clean_ids = _clean_packed_text_ids(batch)
     noisy_ids = clean_ids.clone()
     sample_lens: Sequence[int] = batch["sample_lens"]
@@ -45,6 +57,8 @@ def rebuild_and_corrupt_responses(
     new_indexes: list[torch.Tensor] = []
     new_labels: list[torch.Tensor] = []
     new_weights: list[torch.Tensor] = []
+    new_action_masks: list[torch.Tensor] = []
+    seen_action_indexes: list[torch.Tensor] = []
     document_offset = 0
     for sample_len, spans in zip(sample_lens, response_spans):
         if not spans:
@@ -67,25 +81,47 @@ def rebuild_and_corrupt_responses(
         num_blocks = (response_length + block_size - 1) // block_size
         probabilities = _monotonic_probabilities(num_blocks, clean_response.device)
         probability_per_token = probabilities.repeat_interleave(block_size)[:response_length]
-        masked = torch.rand(response_length, device=clean_response.device) < probability_per_token
+        random_masked = (
+            torch.rand(response_length, device=clean_response.device) < probability_per_token
+        )
         # LLaDA-o uses the response BOS as a clean anchor in the first block.
         # It participates in attention/block geometry but is never a target.
-        masked[0] = False
-        if not bool(masked.any()):
-            masked[
+        random_masked[0] = False
+        if not bool(random_masked.any()):
+            random_masked[
                 torch.randint(1, response_length, (), device=clean_response.device)
             ] = True
-        noisy_ids[packed_offsets[masked]] = mask_id
-        new_indexes.append(absolute_positions[masked])
-        new_labels.append(clean_response[masked])
-        new_weights.append(probability_per_token[masked].reciprocal())
+        forced_masked = torch.isin(absolute_positions, action_indexes)
+        if bool(forced_masked[0]):
+            raise ValueError("response BOS cannot be an action token")
+        selected = random_masked | forced_masked
+        noisy_ids[packed_offsets[selected]] = mask_id
+        new_indexes.append(absolute_positions[selected])
+        new_labels.append(clean_response[selected])
+        # Forced-only action tokens are excluded from the original D2F
+        # importance-sampling estimator and enter the separate action CE.
+        new_weights.append(
+            torch.where(
+                random_masked[selected],
+                probability_per_token[selected].reciprocal(),
+                torch.zeros_like(probability_per_token[selected]),
+            )
+        )
+        new_action_masks.append(forced_masked[selected])
+        if bool(forced_masked.any()):
+            seen_action_indexes.append(absolute_positions[forced_masked])
         document_offset += int(sample_len)
 
     if not new_indexes:
         raise ValueError("packed batch has no supervised D2F responses")
+    if len(action_indexes):
+        seen = torch.cat(seen_action_indexes) if seen_action_indexes else action_indexes[:0]
+        if not torch.equal(torch.sort(seen).values, torch.sort(action_indexes).values):
+            raise ValueError("action token indexes must fall inside one response span")
     result = dict(batch)
     result["packed_text_ids"] = noisy_ids
     result["ce_loss_indexes"] = torch.cat(new_indexes)
     result["packed_label_ids"] = torch.cat(new_labels)
     result["ce_loss_weights"] = torch.cat(new_weights)
+    result["action_ce_mask"] = torch.cat(new_action_masks)
     return result
