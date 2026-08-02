@@ -60,11 +60,25 @@ def rebuild_and_corrupt_responses(
     *,
     mask_id: int,
     block_size: int,
+    full_response_mask_probability: float = 0.0,
 ) -> dict[str, object]:
-    """Recover clean SFT responses, then apply official D2F block corruption."""
+    """Recover clean SFT responses, then apply hybrid D2F corruption.
+
+    With probability ``full_response_mask_probability`` a response is trained
+    from the inference-aligned state where every answer token is masked.  Its
+    BOS remains a clean block anchor.  A zero probability intentionally avoids
+    an extra RNG draw so existing recipes retain their exact corruption stream.
+    """
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+    full_response_mask_probability = float(full_response_mask_probability)
+    if not 0.0 <= full_response_mask_probability <= 1.0:
+        raise ValueError("full_response_mask_probability must be between 0 and 1")
     packed_indexes: torch.Tensor = batch["packed_text_indexes"]
+    original_loss_indexes = batch["ce_loss_indexes"].to(
+        device=packed_indexes.device,
+        dtype=torch.long,
+    )
     action_indexes = _validated_auxiliary_indexes(
         batch,
         key="action_token_indexes",
@@ -93,8 +107,12 @@ def rebuild_and_corrupt_responses(
     new_weights: list[torch.Tensor] = []
     new_action_masks: list[torch.Tensor] = []
     new_content_masks: list[torch.Tensor] = []
+    new_full_response_masks: list[torch.Tensor] = []
+    new_full_response_group_ids: list[torch.Tensor] = []
     seen_action_indexes: list[torch.Tensor] = []
     seen_content_indexes: list[torch.Tensor] = []
+    response_count = 0
+    full_response_masked_count = 0
     document_offset = 0
     for sample_len, spans in zip(sample_lens, response_spans):
         if not spans:
@@ -114,12 +132,46 @@ def rebuild_and_corrupt_responses(
         if not torch.equal(packed_indexes[packed_offsets], absolute_positions):
             raise ValueError("D2F response span must contain only text tokens")
         clean_response = clean_ids[packed_offsets]
-        num_blocks = (response_length + block_size - 1) // block_size
-        probabilities = _monotonic_probabilities(num_blocks, clean_response.device)
-        probability_per_token = probabilities.repeat_interleave(block_size)[:response_length]
-        random_masked = (
-            torch.rand(response_length, device=clean_response.device) < probability_per_token
-        )
+        response_group_id = response_count
+        response_count += 1
+        if full_response_mask_probability == 0.0:
+            full_response_masked = False
+        elif full_response_mask_probability == 1.0:
+            full_response_masked = True
+        else:
+            full_response_masked = bool(
+                torch.rand((), device=clean_response.device)
+                < full_response_mask_probability
+            )
+        if full_response_masked:
+            if not bool(
+                torch.isin(absolute_positions[1:], original_loss_indexes).all()
+            ):
+                raise ValueError(
+                    "full-response corruption requires every answer token, "
+                    "including EOS, to be supervised"
+                )
+            probability_per_token = torch.ones(
+                response_length,
+                device=clean_response.device,
+                dtype=torch.float32,
+            )
+            random_masked = torch.ones(
+                response_length,
+                device=clean_response.device,
+                dtype=torch.bool,
+            )
+            full_response_masked_count += 1
+        else:
+            num_blocks = (response_length + block_size - 1) // block_size
+            probabilities = _monotonic_probabilities(num_blocks, clean_response.device)
+            probability_per_token = probabilities.repeat_interleave(block_size)[
+                :response_length
+            ]
+            random_masked = (
+                torch.rand(response_length, device=clean_response.device)
+                < probability_per_token
+            )
         # LLaDA-o uses the response BOS as a clean anchor in the first block.
         # It participates in attention/block geometry but is never a target.
         random_masked[0] = False
@@ -137,6 +189,12 @@ def rebuild_and_corrupt_responses(
             raise ValueError("action and content CE masks must be disjoint")
         forced_masked = forced_action_masked | forced_content_masked
         selected = random_masked | forced_masked
+        full_response_ce_mask = torch.full_like(
+            selected,
+            full_response_masked,
+            dtype=torch.bool,
+        )
+        full_response_ce_mask[0] = False
         noisy_ids[packed_offsets[selected]] = mask_id
         new_indexes.append(absolute_positions[selected])
         new_labels.append(clean_response[selected])
@@ -152,6 +210,22 @@ def rebuild_and_corrupt_responses(
         )
         new_action_masks.append(forced_action_masked[selected])
         new_content_masks.append(forced_content_masked[selected])
+        new_full_response_masks.append(full_response_ce_mask[selected])
+        new_full_response_group_ids.append(
+            torch.where(
+                full_response_ce_mask[selected],
+                torch.full_like(
+                    absolute_positions[selected],
+                    response_group_id,
+                    dtype=torch.long,
+                ),
+                torch.full_like(
+                    absolute_positions[selected],
+                    -1,
+                    dtype=torch.long,
+                ),
+            )
+        )
         if bool(forced_action_masked.any()):
             seen_action_indexes.append(absolute_positions[forced_action_masked])
         if bool(forced_content_masked.any()):
@@ -179,4 +253,16 @@ def rebuild_and_corrupt_responses(
     result["ce_loss_weights"] = torch.cat(new_weights)
     result["action_ce_mask"] = torch.cat(new_action_masks)
     result["content_ce_mask"] = torch.cat(new_content_masks)
+    result["full_response_ce_mask"] = torch.cat(new_full_response_masks)
+    result["full_response_group_ids"] = torch.cat(new_full_response_group_ids)
+    result["full_response_masked_count"] = torch.tensor(
+        full_response_masked_count,
+        device=packed_indexes.device,
+        dtype=torch.long,
+    )
+    result["d2f_response_count"] = torch.tensor(
+        response_count,
+        device=packed_indexes.device,
+        dtype=torch.long,
+    )
     return result

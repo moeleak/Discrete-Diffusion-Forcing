@@ -219,6 +219,14 @@ def main() -> None:
         block_size=config.model.block_size,
         distill_weight=config.train.distill_weight,
         hard_ce_weight=config.train.hard_ce_weight,
+        action_ce_weight=float(getattr(config.train, "action_ce_weight", 0.0)),
+        content_ce_weight=float(getattr(config.train, "content_ce_weight", 0.0)),
+        full_response_mask_probability=float(
+            getattr(config.train, "full_response_mask_probability", 0.0)
+        ),
+        content_ce_use_action_class_weight=bool(
+            getattr(config.train, "content_ce_use_action_class_weight", True)
+        ),
     )
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -331,10 +339,33 @@ def main() -> None:
                 continue
             step += 1
             validate_scheduler_global_step(scheduler, step)
-            reduced = {
-                key: accelerator.gather(value.detach().reshape(1)).float().mean().item()
+            gathered = {
+                key: accelerator.gather(value.detach().reshape(1)).float()
                 for key, value in metrics.items()
             }
+            reduced = {key: value.mean().item() for key, value in gathered.items()}
+            count_metrics = (
+                "full_response_masked_count",
+                "d2f_response_count",
+                "full_response_token_correct",
+                "full_response_token_count",
+                "full_response_exact",
+                "full_response_count",
+            )
+            for key in count_metrics:
+                reduced[key] = gathered[key].sum().item()
+            reduced["full_response_masked_rate"] = (
+                reduced["full_response_masked_count"]
+                / max(reduced["d2f_response_count"], 1.0)
+            )
+            reduced["full_response_token_accuracy"] = (
+                reduced["full_response_token_correct"]
+                / max(reduced["full_response_token_count"], 1.0)
+            )
+            reduced["full_response_exact_rate"] = (
+                reduced["full_response_exact"]
+                / max(reduced["full_response_count"], 1.0)
+            )
             current_lr = scheduler.get_last_lr()[0]
             if accelerator.is_main_process:
                 progress.set_postfix(

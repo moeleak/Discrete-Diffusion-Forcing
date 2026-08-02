@@ -11,8 +11,10 @@ from torch import nn
 from lladao_d2f.modeling import (
     _convert_conv2d_to_linear_on_meta,
     combine_d2f_and_action_losses,
+    full_response_reconstruction_metrics,
     load_strict_pruned_checkpoint,
     strip_unused_generation_experts,
+    teacher_distillation_loss,
 )
 
 
@@ -178,7 +180,7 @@ def test_action_ce_is_balanced_per_action_not_added_to_d2f_estimator() -> None:
     assert metrics["balanced_content_ce_loss"].item() == 0
 
 
-def test_content_ce_uses_action_class_weight_and_is_separate_from_d2f() -> None:
+def test_content_ce_uses_action_class_weight_by_default_for_compatibility() -> None:
     metrics = combine_d2f_and_action_losses(
         distill=torch.tensor([2.0, 4.0, 8.0, 16.0]),
         hard_ce=torch.tensor([1.0, 3.0, 5.0, 7.0]),
@@ -200,6 +202,111 @@ def test_content_ce_uses_action_class_weight_and_is_separate_from_d2f() -> None:
     assert metrics["content_ce_loss"].item() == pytest.approx(expected_content)
     assert metrics["balanced_content_ce_loss"].item() == pytest.approx(15.0)
     assert metrics["loss"].item() == pytest.approx(expected_d2f + 9.0 + 0.5 * 15.0)
+
+
+def test_content_ce_can_ignore_action_class_weight() -> None:
+    metrics = combine_d2f_and_action_losses(
+        distill=torch.tensor([2.0, 4.0, 8.0, 16.0]),
+        hard_ce=torch.tensor([1.0, 3.0, 5.0, 7.0]),
+        d2f_weights=torch.tensor([2.0, 0.0, 0.0, 4.0]),
+        action_mask=torch.tensor([False, True, False, False]),
+        content_mask=torch.tensor([False, False, True, False]),
+        distill_weight=0.1,
+        hard_ce_weight=1.0,
+        action_ce_weight=1.0,
+        content_ce_weight=0.5,
+        action_class_weight=torch.tensor(3.0),
+        content_ce_use_action_class_weight=False,
+    )
+    expected_d2f = ((1.0 + 0.2) * 2 + (7.0 + 1.6) * 4) / 6
+    assert metrics["action_ce_loss"].item() == pytest.approx(3.0)
+    assert metrics["balanced_action_ce_loss"].item() == pytest.approx(9.0)
+    assert metrics["content_ce_loss"].item() == pytest.approx(5.0)
+    assert metrics["balanced_content_ce_loss"].item() == pytest.approx(5.0)
+    assert metrics["loss"].item() == pytest.approx(expected_d2f + 9.0 + 0.5 * 5.0)
+
+
+def test_full_response_reconstruction_counts_tokens_and_exact_responses() -> None:
+    logits = torch.tensor(
+        [
+            [9.0, 0.0, 0.0],
+            [0.0, 9.0, 0.0],
+            [0.0, 9.0, 0.0],
+            [0.0, 0.0, 9.0],
+            [9.0, 0.0, 0.0],
+        ]
+    )
+    metrics = full_response_reconstruction_metrics(
+        logits=logits,
+        labels=torch.tensor([0, 1, 2, 2, 0]),
+        token_mask=torch.tensor([False, True, True, True, True]),
+        group_ids=torch.tensor([-1, 3, 3, 7, 7]),
+    )
+
+    assert metrics["full_response_token_correct"].item() == 3
+    assert metrics["full_response_token_count"].item() == 4
+    assert metrics["full_response_exact"].item() == 1
+    assert metrics["full_response_count"].item() == 2
+
+
+def test_zero_weight_distillation_does_not_construct_or_call_teacher(
+    monkeypatch,
+) -> None:
+    import lladao_d2f.modeling as modeling
+
+    def fail(*args, **kwargs):
+        raise AssertionError("zero-weight distillation must not touch the teacher")
+
+    monkeypatch.setattr(modeling, "create_full_document_mask", fail)
+    monkeypatch.setattr(modeling, "forward_masked_logits", fail)
+    student_log_probabilities = torch.randn(4, 7)
+
+    loss = teacher_distillation_loss(
+        object(),
+        torch.randn(4, 3),
+        {"sample_lens": [4]},
+        student_log_probabilities,
+        num_heads=2,
+        distill_weight=0.0,
+    )
+
+    assert loss.shape == (4,)
+    assert loss.dtype == student_log_probabilities.dtype
+    assert torch.equal(loss, torch.zeros_like(loss))
+
+
+def test_nonzero_weight_distillation_preserves_cross_entropy(monkeypatch) -> None:
+    import lladao_d2f.modeling as modeling
+
+    teacher_logits = torch.tensor([[1.0, 2.0], [3.0, -1.0]])
+    student_logits = torch.tensor([[0.5, -0.5], [-0.25, 0.75]])
+    marker = object()
+    monkeypatch.setattr(
+        modeling,
+        "create_full_document_mask",
+        lambda *args, **kwargs: marker,
+    )
+
+    def teacher_forward(model, packed_sequence, batch, attention_mask):
+        assert attention_mask is marker
+        return teacher_logits
+
+    monkeypatch.setattr(modeling, "forward_masked_logits", teacher_forward)
+    student_log_probabilities = torch.log_softmax(student_logits, dim=-1)
+
+    loss = teacher_distillation_loss(
+        object(),
+        torch.randn(2, 3),
+        {"sample_lens": [2]},
+        student_log_probabilities,
+        num_heads=2,
+        distill_weight=0.1,
+    )
+    expected = -(
+        torch.softmax(teacher_logits, dim=-1) * student_log_probabilities
+    ).sum(dim=-1)
+
+    assert torch.allclose(loss, expected)
 
 
 def test_contentless_action_has_zero_content_ce_when_enabled() -> None:

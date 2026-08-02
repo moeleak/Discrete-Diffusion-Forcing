@@ -6,6 +6,20 @@ import torch
 from lladao_d2f.noise import rebuild_and_corrupt_responses
 
 
+def _fully_supervised_batch() -> dict[str, object]:
+    return {
+        "packed_text_ids": torch.tensor([10, 999, 999, 999, 999, 999]),
+        "packed_text_indexes": torch.arange(6),
+        "ce_loss_indexes": torch.arange(1, 6),
+        "packed_label_ids": torch.tensor([11, 12, 13, 14, 15]),
+        "ce_loss_weights": torch.ones(5),
+        "sample_lens": [6],
+        "d2f_response_spans": [[(0, 6)]],
+        "action_token_indexes": torch.tensor([2]),
+        "content_token_indexes": torch.tensor([4]),
+    }
+
+
 def test_corruption_rebuilds_clean_response_and_supervises_only_new_masks() -> None:
     torch.manual_seed(7)
     mask_id = 999
@@ -29,6 +43,81 @@ def test_corruption_rebuilds_clean_response_and_supervises_only_new_masks() -> N
     assert bool((result["ce_loss_weights"] >= 1.0).all())
     assert not bool(result["action_ce_mask"].any())
     assert not bool(result["content_ce_mask"].any())
+
+
+def test_zero_full_response_probability_preserves_legacy_rng_and_outputs() -> None:
+    batch = _fully_supervised_batch()
+    torch.manual_seed(17)
+    legacy = rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+    torch.manual_seed(17)
+    explicit_zero = rebuild_and_corrupt_responses(
+        batch,
+        mask_id=999,
+        block_size=2,
+        full_response_mask_probability=0.0,
+    )
+
+    for key in (
+        "packed_text_ids",
+        "ce_loss_indexes",
+        "packed_label_ids",
+        "ce_loss_weights",
+        "action_ce_mask",
+        "content_ce_mask",
+    ):
+        assert torch.equal(legacy[key], explicit_zero[key])
+    assert explicit_zero["full_response_masked_count"].item() == 0
+    assert explicit_zero["d2f_response_count"].item() == 1
+    assert not bool(explicit_zero["full_response_ce_mask"].any())
+
+
+def test_full_response_corruption_masks_and_supervises_json_through_eos() -> None:
+    batch = _fully_supervised_batch()
+
+    result = rebuild_and_corrupt_responses(
+        batch,
+        mask_id=999,
+        block_size=16,
+        full_response_mask_probability=1.0,
+    )
+
+    # Position zero is the response BOS; position five represents its EOS.
+    assert result["packed_text_ids"][0].item() == 10
+    assert torch.equal(result["ce_loss_indexes"], torch.arange(1, 6))
+    assert torch.equal(result["packed_label_ids"], torch.tensor([11, 12, 13, 14, 15]))
+    assert bool((result["packed_text_ids"][1:] == 999).all())
+    assert bool((result["ce_loss_weights"] == 1.0).all())
+    assert bool(result["full_response_ce_mask"].all())
+    assert torch.equal(result["full_response_group_ids"], torch.zeros(5, dtype=torch.long))
+    assert result["full_response_masked_count"].item() == 1
+    assert result["d2f_response_count"].item() == 1
+    assert bool(result["action_ce_mask"][1])
+    assert bool(result["content_ce_mask"][3])
+
+
+@pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan")])
+def test_full_response_probability_must_be_valid(probability: float) -> None:
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        rebuild_and_corrupt_responses(
+            _fully_supervised_batch(),
+            mask_id=999,
+            block_size=2,
+            full_response_mask_probability=probability,
+        )
+
+
+def test_full_response_corruption_requires_eos_supervision() -> None:
+    batch = _fully_supervised_batch()
+    batch["ce_loss_indexes"] = torch.arange(1, 5)
+    batch["packed_label_ids"] = torch.tensor([11, 12, 13, 14])
+
+    with pytest.raises(ValueError, match="including EOS"):
+        rebuild_and_corrupt_responses(
+            batch,
+            mask_id=999,
+            block_size=16,
+            full_response_mask_probability=1.0,
+        )
 
 
 def test_corruption_rejects_batches_without_supervised_responses() -> None:

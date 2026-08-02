@@ -343,6 +343,7 @@ def combine_d2f_and_action_losses(
     action_class_weight: torch.Tensor,
     content_mask: torch.Tensor | None = None,
     content_ce_weight: float = 0.0,
+    content_ce_use_action_class_weight: bool = True,
 ) -> dict[str, torch.Tensor]:
     if content_mask is None:
         content_mask = torch.zeros_like(action_mask, dtype=torch.bool)
@@ -375,9 +376,14 @@ def combine_d2f_and_action_losses(
         balanced_action_ce = hard_ce.new_zeros(())
     if bool(content_mask.any()):
         content_ce = hard_ce[content_mask].mean()
-        # Payload/content tokens inherit the weight of their action class so
-        # rare actions are balanced consistently across both auxiliary terms.
-        balanced_content_ce = content_ce * action_class_weight.float().reshape(())
+        if content_ce_use_action_class_weight:
+            balanced_content_ce = (
+                content_ce * action_class_weight.float().reshape(())
+            )
+        else:
+            # Open-vocabulary payload tokens should not be downweighted merely
+            # because their enclosing action class (commonly CLICK) is frequent.
+            balanced_content_ce = content_ce
     else:
         # Some actions intentionally have no payload (for example BACK/HOME).
         # Enabling content CE must therefore remain valid for contentless
@@ -400,6 +406,69 @@ def combine_d2f_and_action_losses(
     }
 
 
+def full_response_reconstruction_metrics(
+    *,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    token_mask: torch.Tensor,
+    group_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Count token and whole-response reconstruction for full-mask examples."""
+    if logits.ndim != 2 or labels.shape != logits.shape[:1]:
+        raise ValueError("full-response logits and labels have incompatible shapes")
+    if token_mask.shape != labels.shape or group_ids.shape != labels.shape:
+        raise ValueError("full-response token metadata must match labels")
+    token_mask = token_mask.bool()
+    selected_group_ids = group_ids[token_mask].long()
+    if bool((selected_group_ids < 0).any()):
+        raise ValueError("full-response tokens must have non-negative group IDs")
+    token_correct = logits.argmax(dim=-1).eq(labels)
+    selected_correct = token_correct[token_mask]
+    groups = torch.unique(selected_group_ids, sorted=True)
+    if len(groups):
+        exact = torch.stack(
+            [selected_correct[selected_group_ids == group].all() for group in groups]
+        ).sum()
+    else:
+        exact = labels.new_zeros(())
+    return {
+        "full_response_token_correct": selected_correct.sum(),
+        "full_response_token_count": token_mask.sum(),
+        "full_response_exact": exact,
+        "full_response_count": labels.new_tensor(len(groups)),
+    }
+
+
+def teacher_distillation_loss(
+    model,
+    packed_sequence: torch.Tensor,
+    batch: dict[str, Any],
+    student_log_probabilities: torch.Tensor,
+    *,
+    num_heads: int,
+    distill_weight: float,
+) -> torch.Tensor:
+    """Return tokenwise distillation loss without invoking a zero-weight teacher."""
+    if distill_weight == 0.0:
+        return student_log_probabilities.new_zeros(
+            student_log_probabilities.shape[0]
+        )
+    teacher_mask = create_full_document_mask(
+        batch["sample_lens"],
+        num_heads=num_heads,
+        device=packed_sequence.device,
+    )
+    with torch.no_grad(), adapter_disabled(model):
+        teacher_logits = forward_masked_logits(
+            model,
+            packed_sequence,
+            batch,
+            teacher_mask,
+        )
+        teacher_probabilities = torch.softmax(teacher_logits.float(), dim=-1)
+    return -(teacher_probabilities * student_log_probabilities).sum(dim=-1)
+
+
 class LLaDAOGuiD2FModel(nn.Module):
     """DDP-safe teacher/student wrapper around a single PEFT LLaDA-o model."""
 
@@ -413,6 +482,8 @@ class LLaDAOGuiD2FModel(nn.Module):
         hard_ce_weight: float = 0.1,
         action_ce_weight: float = 0.0,
         content_ce_weight: float = 0.0,
+        full_response_mask_probability: float = 0.0,
+        content_ce_use_action_class_weight: bool = True,
     ):
         super().__init__()
         self.peft_model = peft_model
@@ -422,12 +493,15 @@ class LLaDAOGuiD2FModel(nn.Module):
         self.hard_ce_weight = hard_ce_weight
         self.action_ce_weight = action_ce_weight
         self.content_ce_weight = content_ce_weight
+        self.full_response_mask_probability = full_response_mask_probability
+        self.content_ce_use_action_class_weight = content_ce_use_action_class_weight
 
     def forward(self, raw_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         batch = rebuild_and_corrupt_responses(
             raw_batch,
             mask_id=self.mask_id,
             block_size=self.block_size,
+            full_response_mask_probability=self.full_response_mask_probability,
         )
         base = unwrap_lladao(self.peft_model)
         packed_sequence = prepare_understanding_sequence(self.peft_model, batch)
@@ -438,22 +512,18 @@ class LLaDAOGuiD2FModel(nn.Module):
             num_heads=base.num_heads,
             device=packed_sequence.device,
         )
-        teacher_mask = create_full_document_mask(
-            batch["sample_lens"],
-            num_heads=base.num_heads,
-            device=packed_sequence.device,
-        )
-        with torch.no_grad(), adapter_disabled(self.peft_model):
-            teacher_logits = forward_masked_logits(
-                self.peft_model, packed_sequence, batch, teacher_mask
-            )
-            teacher_probabilities = torch.softmax(teacher_logits.float(), dim=-1)
-            del teacher_logits
         student_logits = forward_masked_logits(
             self.peft_model, packed_sequence, batch, student_mask
         )
         student_log_probabilities = torch.log_softmax(student_logits.float(), dim=-1)
-        distill = -(teacher_probabilities * student_log_probabilities).sum(dim=-1)
+        distill = teacher_distillation_loss(
+            self.peft_model,
+            packed_sequence,
+            batch,
+            student_log_probabilities,
+            num_heads=base.num_heads,
+            distill_weight=self.distill_weight,
+        )
         hard_ce = torch.nn.functional.cross_entropy(
             student_logits.float(), batch["packed_label_ids"].long(), reduction="none"
         )
@@ -474,7 +544,20 @@ class LLaDAOGuiD2FModel(nn.Module):
             action_class_weight=class_weight,
             content_mask=content_mask,
             content_ce_weight=self.content_ce_weight,
+            content_ce_use_action_class_weight=(
+                self.content_ce_use_action_class_weight
+            ),
         )
+        metrics.update(
+            full_response_reconstruction_metrics(
+                logits=student_logits.detach(),
+                labels=batch["packed_label_ids"].long(),
+                token_mask=batch["full_response_ce_mask"],
+                group_ids=batch["full_response_group_ids"],
+            )
+        )
+        response_count = batch["d2f_response_count"]
+        full_response_count = batch["full_response_masked_count"]
         metrics.update({
             "masked_tokens": torch.tensor(
                 len(batch["packed_label_ids"]), device=hard_ce.device, dtype=torch.long
@@ -483,5 +566,10 @@ class LLaDAOGuiD2FModel(nn.Module):
             "action_tokens": action_mask.sum(),
             "content_tokens": content_mask.sum(),
             "action_class_weight": class_weight.float().reshape(()),
+            "full_response_masked_count": full_response_count,
+            "d2f_response_count": response_count,
+            "full_response_masked_rate": (
+                full_response_count.float() / response_count.clamp_min(1).float()
+            ),
         })
         return metrics
