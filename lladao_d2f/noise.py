@@ -25,6 +25,36 @@ def _monotonic_probabilities(num_blocks: int, device: torch.device) -> torch.Ten
     return torch.cat([first.unsqueeze(0), first + torch.cumsum(increments, dim=0)]).clamp(max=1.0)
 
 
+def _validated_auxiliary_indexes(
+    batch: dict[str, object],
+    *,
+    key: str,
+    display_name: str,
+    packed_indexes: torch.Tensor,
+    allow_empty: bool,
+) -> torch.Tensor:
+    value = batch.get(key)
+    if value is None:
+        return torch.empty(0, dtype=torch.long, device=packed_indexes.device)
+    if not isinstance(value, torch.Tensor):
+        raise ValueError(f"{display_name} token indexes must be a tensor")
+    indexes = value.to(device=packed_indexes.device, dtype=torch.long)
+    if indexes.ndim != 1 or (not allow_empty and len(indexes) == 0):
+        qualifier = "one vector" if allow_empty else "one non-empty vector"
+        raise ValueError(f"{display_name} token indexes must be {qualifier}")
+    if len(torch.unique(indexes)) != len(indexes):
+        raise ValueError(f"{display_name} token indexes must be unique")
+    old_loss_indexes = batch["ce_loss_indexes"].to(
+        device=packed_indexes.device,
+        dtype=torch.long,
+    )
+    if not bool(torch.isin(indexes, old_loss_indexes).all()):
+        raise ValueError(
+            f"{display_name} token indexes must be supervised answer tokens"
+        )
+    return indexes
+
+
 def rebuild_and_corrupt_responses(
     batch: dict[str, object],
     *,
@@ -35,18 +65,22 @@ def rebuild_and_corrupt_responses(
     if block_size <= 0:
         raise ValueError("block_size must be positive")
     packed_indexes: torch.Tensor = batch["packed_text_indexes"]
-    action_indexes = batch.get("action_token_indexes")
-    if action_indexes is None:
-        action_indexes = torch.empty(0, dtype=torch.long, device=packed_indexes.device)
-    else:
-        action_indexes = action_indexes.long()
-        if action_indexes.ndim != 1 or len(action_indexes) == 0:
-            raise ValueError("action token indexes must be one non-empty vector")
-        if len(torch.unique(action_indexes)) != len(action_indexes):
-            raise ValueError("action token indexes must be unique")
-        old_loss_indexes = batch["ce_loss_indexes"].long()
-        if not bool(torch.isin(action_indexes, old_loss_indexes).all()):
-            raise ValueError("action token indexes must be supervised answer tokens")
+    action_indexes = _validated_auxiliary_indexes(
+        batch,
+        key="action_token_indexes",
+        display_name="action",
+        packed_indexes=packed_indexes,
+        allow_empty=False,
+    )
+    content_indexes = _validated_auxiliary_indexes(
+        batch,
+        key="content_token_indexes",
+        display_name="content",
+        packed_indexes=packed_indexes,
+        allow_empty=True,
+    )
+    if bool(torch.isin(action_indexes, content_indexes).any()):
+        raise ValueError("action and content token indexes must be disjoint")
     clean_ids = _clean_packed_text_ids(batch)
     noisy_ids = clean_ids.clone()
     sample_lens: Sequence[int] = batch["sample_lens"]
@@ -58,7 +92,9 @@ def rebuild_and_corrupt_responses(
     new_labels: list[torch.Tensor] = []
     new_weights: list[torch.Tensor] = []
     new_action_masks: list[torch.Tensor] = []
+    new_content_masks: list[torch.Tensor] = []
     seen_action_indexes: list[torch.Tensor] = []
+    seen_content_indexes: list[torch.Tensor] = []
     document_offset = 0
     for sample_len, spans in zip(sample_lens, response_spans):
         if not spans:
@@ -91,15 +127,22 @@ def rebuild_and_corrupt_responses(
             random_masked[
                 torch.randint(1, response_length, (), device=clean_response.device)
             ] = True
-        forced_masked = torch.isin(absolute_positions, action_indexes)
-        if bool(forced_masked[0]):
+        forced_action_masked = torch.isin(absolute_positions, action_indexes)
+        forced_content_masked = torch.isin(absolute_positions, content_indexes)
+        if bool(forced_action_masked[0]):
             raise ValueError("response BOS cannot be an action token")
+        if bool(forced_content_masked[0]):
+            raise ValueError("response BOS cannot be a content token")
+        if bool((forced_action_masked & forced_content_masked).any()):
+            raise ValueError("action and content CE masks must be disjoint")
+        forced_masked = forced_action_masked | forced_content_masked
         selected = random_masked | forced_masked
         noisy_ids[packed_offsets[selected]] = mask_id
         new_indexes.append(absolute_positions[selected])
         new_labels.append(clean_response[selected])
-        # Forced-only action tokens are excluded from the original D2F
-        # importance-sampling estimator and enter the separate action CE.
+        # Tokens selected only by either forced auxiliary mask are excluded
+        # from the original D2F importance-sampling estimator.  They enter the
+        # separate action/content CE terms instead.
         new_weights.append(
             torch.where(
                 random_masked[selected],
@@ -107,9 +150,12 @@ def rebuild_and_corrupt_responses(
                 torch.zeros_like(probability_per_token[selected]),
             )
         )
-        new_action_masks.append(forced_masked[selected])
-        if bool(forced_masked.any()):
-            seen_action_indexes.append(absolute_positions[forced_masked])
+        new_action_masks.append(forced_action_masked[selected])
+        new_content_masks.append(forced_content_masked[selected])
+        if bool(forced_action_masked.any()):
+            seen_action_indexes.append(absolute_positions[forced_action_masked])
+        if bool(forced_content_masked.any()):
+            seen_content_indexes.append(absolute_positions[forced_content_masked])
         document_offset += int(sample_len)
 
     if not new_indexes:
@@ -118,10 +164,19 @@ def rebuild_and_corrupt_responses(
         seen = torch.cat(seen_action_indexes) if seen_action_indexes else action_indexes[:0]
         if not torch.equal(torch.sort(seen).values, torch.sort(action_indexes).values):
             raise ValueError("action token indexes must fall inside one response span")
+    if len(content_indexes):
+        seen = (
+            torch.cat(seen_content_indexes)
+            if seen_content_indexes
+            else content_indexes[:0]
+        )
+        if not torch.equal(torch.sort(seen).values, torch.sort(content_indexes).values):
+            raise ValueError("content token indexes must fall inside one response span")
     result = dict(batch)
     result["packed_text_ids"] = noisy_ids
     result["ce_loss_indexes"] = torch.cat(new_indexes)
     result["packed_label_ids"] = torch.cat(new_labels)
     result["ce_loss_weights"] = torch.cat(new_weights)
     result["action_ce_mask"] = torch.cat(new_action_masks)
+    result["content_ce_mask"] = torch.cat(new_content_masks)
     return result

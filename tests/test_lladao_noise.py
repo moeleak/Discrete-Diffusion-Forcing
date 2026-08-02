@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from lladao_d2f.noise import rebuild_and_corrupt_responses
@@ -26,6 +27,8 @@ def test_corruption_rebuilds_clean_response_and_supervises_only_new_masks() -> N
     assert torch.equal(labels, clean[indexes])
     assert bool((result["packed_text_ids"][indexes] == mask_id).all())
     assert bool((result["ce_loss_weights"] >= 1.0).all())
+    assert not bool(result["action_ce_mask"].any())
+    assert not bool(result["content_ce_mask"].any())
 
 
 def test_corruption_rejects_batches_without_supervised_responses() -> None:
@@ -67,11 +70,99 @@ def test_action_tokens_are_always_masked_without_biasing_d2f_weights() -> None:
         action_offset = int((selected == action_index).nonzero().item())
         assert result["packed_text_ids"][action_index].item() == mask_id
         assert bool(result["action_ce_mask"][action_offset])
+        assert not bool(result["content_ce_mask"][action_offset])
         if result["ce_loss_weights"][action_offset].item() == 0:
             observed_forced_only = True
         else:
             assert result["ce_loss_weights"][action_offset].item() >= 1
     assert observed_forced_only
+
+
+def test_content_tokens_are_always_masked_without_biasing_d2f_weights() -> None:
+    mask_id = 999
+    action_index = 1
+    content_index = 4
+    observed_forced_only = False
+    for seed in range(20):
+        torch.manual_seed(seed)
+        batch = {
+            "packed_text_ids": torch.tensor([10, 11, 12, 13, 14, 15]),
+            "packed_text_indexes": torch.arange(6),
+            "ce_loss_indexes": torch.arange(1, 6),
+            "packed_label_ids": torch.tensor([11, 12, 13, 14, 15]),
+            "ce_loss_weights": torch.ones(5),
+            "sample_lens": [6],
+            "d2f_response_spans": [[(0, 6)]],
+            "action_token_indexes": torch.tensor([action_index]),
+            "content_token_indexes": torch.tensor([content_index]),
+        }
+        result = rebuild_and_corrupt_responses(batch, mask_id=mask_id, block_size=16)
+        selected = result["ce_loss_indexes"].long()
+        content_offset = int((selected == content_index).nonzero().item())
+        assert result["packed_text_ids"][content_index].item() == mask_id
+        assert bool(result["content_ce_mask"][content_offset])
+        assert not bool(result["action_ce_mask"][content_offset])
+        assert not bool(
+            (result["action_ce_mask"] & result["content_ce_mask"]).any()
+        )
+        if result["ce_loss_weights"][content_offset].item() == 0:
+            observed_forced_only = True
+        else:
+            assert result["ce_loss_weights"][content_offset].item() >= 1
+    assert observed_forced_only
+
+
+def test_empty_content_indexes_produce_an_empty_content_ce_mask() -> None:
+    batch = {
+        "packed_text_ids": torch.tensor([10, 11, 12]),
+        "packed_text_indexes": torch.arange(3),
+        "ce_loss_indexes": torch.tensor([1, 2]),
+        "packed_label_ids": torch.tensor([11, 12]),
+        "ce_loss_weights": torch.ones(2),
+        "sample_lens": [3],
+        "d2f_response_spans": [[(0, 3)]],
+        "action_token_indexes": torch.tensor([1]),
+        "content_token_indexes": torch.empty(0, dtype=torch.long),
+    }
+
+    result = rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+
+    assert not bool(result["content_ce_mask"].any())
+    assert result["content_ce_mask"].shape == result["action_ce_mask"].shape
+
+
+def test_action_and_content_indexes_must_be_disjoint() -> None:
+    batch = {
+        "packed_text_ids": torch.tensor([10, 11, 12]),
+        "packed_text_indexes": torch.arange(3),
+        "ce_loss_indexes": torch.tensor([1, 2]),
+        "packed_label_ids": torch.tensor([11, 12]),
+        "ce_loss_weights": torch.ones(2),
+        "sample_lens": [3],
+        "d2f_response_spans": [[(0, 3)]],
+        "action_token_indexes": torch.tensor([1]),
+        "content_token_indexes": torch.tensor([1]),
+    }
+
+    with pytest.raises(ValueError, match="must be disjoint"):
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+
+
+def test_content_indexes_must_fall_inside_a_response_span() -> None:
+    batch = {
+        "packed_text_ids": torch.tensor([10, 11, 12, 13]),
+        "packed_text_indexes": torch.arange(4),
+        "ce_loss_indexes": torch.tensor([1, 2, 3]),
+        "packed_label_ids": torch.tensor([11, 12, 13]),
+        "ce_loss_weights": torch.ones(3),
+        "sample_lens": [4],
+        "d2f_response_spans": [[(0, 3)]],
+        "action_token_indexes": torch.tensor([1]),
+        "content_token_indexes": torch.tensor([3]),
+    }
+
+    with pytest.raises(ValueError, match="content token indexes must fall inside"):
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
 
 
 def test_action_indexes_must_be_supervised_answer_tokens() -> None:

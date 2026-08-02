@@ -341,9 +341,23 @@ def combine_d2f_and_action_losses(
     hard_ce_weight: float,
     action_ce_weight: float,
     action_class_weight: torch.Tensor,
+    content_mask: torch.Tensor | None = None,
+    content_ce_weight: float = 0.0,
 ) -> dict[str, torch.Tensor]:
-    if not (distill.shape == hard_ce.shape == d2f_weights.shape == action_mask.shape):
+    if content_mask is None:
+        content_mask = torch.zeros_like(action_mask, dtype=torch.bool)
+    if not (
+        distill.shape
+        == hard_ce.shape
+        == d2f_weights.shape
+        == action_mask.shape
+        == content_mask.shape
+    ):
         raise ValueError("token loss tensors must have identical shapes")
+    action_mask = action_mask.bool()
+    content_mask = content_mask.bool()
+    if bool((action_mask & content_mask).any()):
+        raise ValueError("action and content CE masks must be disjoint")
     denominator = d2f_weights.sum()
     if not bool(denominator > 0):
         raise ValueError("D2F random-mask weights must have positive mass")
@@ -359,13 +373,30 @@ def combine_d2f_and_action_losses(
             raise ValueError("action CE is enabled but the batch has no action tokens")
         action_ce = hard_ce.new_zeros(())
         balanced_action_ce = hard_ce.new_zeros(())
+    if bool(content_mask.any()):
+        content_ce = hard_ce[content_mask].mean()
+        # Payload/content tokens inherit the weight of their action class so
+        # rare actions are balanced consistently across both auxiliary terms.
+        balanced_content_ce = content_ce * action_class_weight.float().reshape(())
+    else:
+        # Some actions intentionally have no payload (for example BACK/HOME).
+        # Enabling content CE must therefore remain valid for contentless
+        # samples and contribute an exact zero.
+        content_ce = hard_ce.new_zeros(())
+        balanced_content_ce = hard_ce.new_zeros(())
     return {
-        "loss": d2f_loss + action_ce_weight * balanced_action_ce,
+        "loss": (
+            d2f_loss
+            + action_ce_weight * balanced_action_ce
+            + content_ce_weight * balanced_content_ce
+        ),
         "d2f_loss": d2f_loss,
         "distill_loss": weighted_distill,
         "hard_ce_loss": weighted_hard_ce,
         "action_ce_loss": action_ce,
         "balanced_action_ce_loss": balanced_action_ce,
+        "content_ce_loss": content_ce,
+        "balanced_content_ce_loss": balanced_content_ce,
     }
 
 
@@ -381,6 +412,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         distill_weight: float = 1.0,
         hard_ce_weight: float = 0.1,
         action_ce_weight: float = 0.0,
+        content_ce_weight: float = 0.0,
     ):
         super().__init__()
         self.peft_model = peft_model
@@ -389,6 +421,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         self.distill_weight = distill_weight
         self.hard_ce_weight = hard_ce_weight
         self.action_ce_weight = action_ce_weight
+        self.content_ce_weight = content_ce_weight
 
     def forward(self, raw_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         batch = rebuild_and_corrupt_responses(
@@ -426,6 +459,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         )
         weights = batch["ce_loss_weights"].float()
         action_mask = batch["action_ce_mask"].bool()
+        content_mask = batch["content_ce_mask"].bool()
         class_weight = batch.get("action_class_weight")
         if class_weight is None:
             class_weight = hard_ce.new_ones(())
@@ -438,6 +472,8 @@ class LLaDAOGuiD2FModel(nn.Module):
             hard_ce_weight=self.hard_ce_weight,
             action_ce_weight=self.action_ce_weight,
             action_class_weight=class_weight,
+            content_mask=content_mask,
+            content_ce_weight=self.content_ce_weight,
         )
         metrics.update({
             "masked_tokens": torch.tensor(
@@ -445,6 +481,7 @@ class LLaDAOGuiD2FModel(nn.Module):
             ),
             "d2f_random_masked_tokens": (weights > 0).sum(),
             "action_tokens": action_mask.sum(),
+            "content_tokens": content_mask.sum(),
             "action_class_weight": class_weight.float().reshape(()),
         })
         return metrics
