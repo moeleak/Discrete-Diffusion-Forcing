@@ -4,13 +4,25 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from accelerate import init_empty_weights
+from safetensors.torch import save_file
 from torch import nn
 
-from lladao_d2f.modeling import combine_d2f_and_action_losses, strip_unused_generation_experts
+from lladao_d2f.modeling import (
+    _convert_conv2d_to_linear_on_meta,
+    combine_d2f_and_action_losses,
+    load_strict_pruned_checkpoint,
+    strip_unused_generation_experts,
+)
 
 
 class _ToyUnderstandingModel(nn.Module):
-    def __init__(self, *, visual_gen: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        visual_gen: bool = False,
+        meta_runtime_buffer: bool = False,
+    ) -> None:
         super().__init__()
         self.config = SimpleNamespace(visual_gen=visual_gen)
         self.keep = nn.Linear(4, 4, bias=False)
@@ -21,6 +33,29 @@ class _ToyUnderstandingModel(nn.Module):
             nn.SiLU(),
             nn.Linear(8, 4, bias=False),
         )
+        buffer_device = "meta" if meta_runtime_buffer else "cpu"
+        self.register_buffer(
+            "runtime_scale",
+            torch.arange(4, dtype=torch.float32, device=buffer_device),
+            persistent=False,
+        )
+
+
+def _empty_toy(*, meta_runtime_buffer: bool = False) -> _ToyUnderstandingModel:
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.bfloat16)
+        with init_empty_weights(include_buffers=False):
+            return _ToyUnderstandingModel(meta_runtime_buffer=meta_runtime_buffer)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+
+def _save_toy_checkpoint(path) -> _ToyUnderstandingModel:
+    torch.manual_seed(7)
+    reference = _ToyUnderstandingModel().to(torch.bfloat16)
+    save_file(reference.state_dict(), str(path))
+    return reference
 
 
 def test_strip_generation_experts_preserves_understanding_path() -> None:
@@ -46,6 +81,80 @@ def test_strip_generation_experts_preserves_understanding_path() -> None:
 def test_strip_generation_experts_rejects_generation_model() -> None:
     with pytest.raises(ValueError, match="visual_gen=False"):
         strip_unused_generation_experts(_ToyUnderstandingModel(visual_gen=True))
+
+
+def test_meta_checkpoint_load_is_strict_pruned_and_exact(tmp_path) -> None:
+    checkpoint = tmp_path / "toy.safetensors"
+    reference = _save_toy_checkpoint(checkpoint)
+    model = _empty_toy()
+    inputs = torch.randn(3, 4, dtype=torch.bfloat16)
+
+    assert all(parameter.is_meta for parameter in model.parameters())
+    assert not model.runtime_scale.is_meta
+    removed = load_strict_pruned_checkpoint(model, checkpoint)
+
+    assert removed == 80
+    assert not any(parameter.is_meta for parameter in model.parameters())
+    assert not any(buffer.is_meta for buffer in model.buffers())
+    assert not any("_moe_gen" in name for name, _ in model.named_parameters())
+    assert torch.equal(model.keep.weight, reference.keep.weight)
+    assert torch.equal(model.keep(inputs), reference.keep(inputs))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "missing"),
+        ("unexpected", "unexpected"),
+        ("shape", "shape mismatches"),
+        ("dtype", "dtype mismatches"),
+    ],
+)
+def test_meta_checkpoint_load_rejects_mismatch(tmp_path, mutation, message) -> None:
+    reference = _ToyUnderstandingModel().to(torch.bfloat16)
+    state = dict(reference.state_dict())
+    if mutation == "missing":
+        del state["keep.weight"]
+    elif mutation == "unexpected":
+        state["unexpected.weight"] = torch.zeros(1, dtype=torch.bfloat16)
+    elif mutation == "shape":
+        state["keep.weight"] = torch.zeros(3, 4, dtype=torch.bfloat16)
+    elif mutation == "dtype":
+        state["keep.weight"] = state["keep.weight"].float()
+    checkpoint = tmp_path / f"{mutation}.safetensors"
+    save_file(state, str(checkpoint))
+
+    with pytest.raises(RuntimeError, match=message):
+        load_strict_pruned_checkpoint(_empty_toy(), checkpoint)
+
+
+def test_meta_checkpoint_load_rejects_meta_runtime_buffer(tmp_path) -> None:
+    checkpoint = tmp_path / "toy.safetensors"
+    _save_toy_checkpoint(checkpoint)
+
+    with pytest.raises(RuntimeError, match="buffer:runtime_scale"):
+        load_strict_pruned_checkpoint(
+            _empty_toy(meta_runtime_buffer=True),
+            checkpoint,
+        )
+
+
+def test_vision_conversion_requires_explicit_meta_support() -> None:
+    class Compatible:
+        received_meta = None
+
+        def convert_conv2d_to_linear(self, config, meta=False):
+            self.received_meta = meta
+
+    class Incompatible:
+        def convert_conv2d_to_linear(self, config):
+            raise AssertionError("must fail before calling an incompatible conversion")
+
+    compatible = Compatible()
+    _convert_conv2d_to_linear_on_meta(compatible, object())
+    assert compatible.received_meta is True
+    with pytest.raises(RuntimeError, match="explicitly support meta=True"):
+        _convert_conv2d_to_linear_on_meta(Incompatible(), object())
 
 
 def test_action_ce_is_balanced_per_action_not_added_to_d2f_estimator() -> None:

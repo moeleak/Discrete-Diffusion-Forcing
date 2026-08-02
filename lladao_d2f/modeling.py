@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import re
 import sys
 from contextlib import nullcontext
@@ -28,8 +29,8 @@ def strip_unused_generation_experts(model) -> int:
     with ``visual_gen=False`` and empty generation-token indexes, so those
     modules receive only empty tensors during training and are never reached
     during understanding-mode inference.  Replacing them after strict
-    checkpoint loading preserves the GUI computation exactly while avoiding
-    moving roughly seven billion unused parameters to every GPU.
+    checkpoint validation preserves the GUI computation exactly while
+    avoiding moving roughly seven billion unused parameters to every GPU.
     """
     if getattr(getattr(model, "config", None), "visual_gen", None) is not False:
         raise ValueError("generation experts may only be stripped with visual_gen=False")
@@ -51,6 +52,104 @@ def strip_unused_generation_experts(model) -> int:
     if not removed_modules or removed_parameters == 0:
         raise RuntimeError("expected LLaDA-o MoT generation experts but found none")
     return removed_parameters
+
+
+def _summarize_checkpoint_mismatches(values: list[str], *, limit: int = 8) -> str:
+    shown = values[:limit]
+    suffix = f", ... ({len(values)} total)" if len(values) > limit else ""
+    return ", ".join(shown) + suffix
+
+
+def load_strict_pruned_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+) -> int:
+    """Strictly bind a safetensors checkpoint to a pruned meta model.
+
+    Validation is deliberately performed against the complete model before
+    pruning.  This prevents generation-expert keys, or any other unexpected
+    checkpoint content, from being silently ignored.  Once validated, only
+    understanding-path tensors are assigned, so generation experts never
+    need an allocated CPU copy.
+    """
+    from safetensors.torch import load_file
+
+    checkpoint = load_file(
+        str(Path(checkpoint_path).expanduser().resolve()),
+        device="cpu",
+    )
+    expected = model.state_dict()
+    expected_keys = set(expected)
+    checkpoint_keys = set(checkpoint)
+    missing = sorted(expected_keys - checkpoint_keys)
+    unexpected = sorted(checkpoint_keys - expected_keys)
+    common = sorted(expected_keys & checkpoint_keys)
+    shape_mismatches = [
+        f"{key}: expected {tuple(expected[key].shape)}, got {tuple(checkpoint[key].shape)}"
+        for key in common
+        if expected[key].shape != checkpoint[key].shape
+    ]
+    dtype_mismatches = [
+        f"{key}: expected {expected[key].dtype}, got {checkpoint[key].dtype}"
+        for key in common
+        if expected[key].dtype != checkpoint[key].dtype
+    ]
+    problems = []
+    for name, values in (
+        ("missing", missing),
+        ("unexpected", unexpected),
+        ("shape mismatches", shape_mismatches),
+        ("dtype mismatches", dtype_mismatches),
+    ):
+        if values:
+            problems.append(f"{name}=[{_summarize_checkpoint_mismatches(values)}]")
+    if problems:
+        raise RuntimeError("checkpoint mismatch: " + "; ".join(problems))
+
+    removed_parameters = strip_unused_generation_experts(model)
+    retained_expected = model.state_dict()
+    retained = {key: checkpoint[key] for key in retained_expected}
+    del checkpoint, expected, retained_expected
+    incompatible = model.load_state_dict(retained, strict=True, assign=True)
+    del retained
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "checkpoint mismatch after pruning: "
+            f"missing={incompatible.missing_keys}, "
+            f"unexpected={incompatible.unexpected_keys}"
+        )
+
+    meta_tensors = [
+        f"parameter:{name}"
+        for name, parameter in model.named_parameters()
+        if parameter.is_meta
+    ]
+    meta_tensors.extend(
+        f"buffer:{name}" for name, buffer in model.named_buffers() if buffer.is_meta
+    )
+    if meta_tensors:
+        raise RuntimeError(
+            "checkpoint load left tensors on meta: "
+            + _summarize_checkpoint_mismatches(meta_tensors)
+        )
+    return removed_parameters
+
+
+def _convert_conv2d_to_linear_on_meta(embeddings: nn.Module, config: Any) -> None:
+    conversion = getattr(embeddings, "convert_conv2d_to_linear", None)
+    if conversion is None:
+        raise RuntimeError("LLaDA-o vision embeddings lack convert_conv2d_to_linear")
+    try:
+        parameters = inspect.signature(conversion).parameters
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            "cannot verify LLaDA-o meta vision-conversion compatibility"
+        ) from error
+    if "meta" not in parameters:
+        raise RuntimeError(
+            "LLaDA-o convert_conv2d_to_linear must explicitly support meta=True"
+        )
+    conversion(config, meta=True)
 
 
 def add_lladao_repo(lladao_repo: str | Path) -> Path:
@@ -80,7 +179,7 @@ def load_base_model(
         SiglipVisionConfig,
         SiglipVisionModel,
     )
-    from safetensors.torch import load_model
+    from accelerate import init_empty_weights
     from transformers import AutoTokenizer
 
     model_path = Path(model_path).expanduser().resolve()
@@ -104,22 +203,23 @@ def load_base_model(
         latent_patch_size=2,
         max_latent_size=64,
     )
-    # Construct directly in the checkpoint dtype. Building both DDP replicas
-    # in FP32 first peaks above the 128 GB host-memory limit before either
-    # process can move its model to the GPU.
+    # Keep parameters on meta while retaining real, non-persistent runtime
+    # buffers.  The latter is required for RoPE buffers that are absent from
+    # the checkpoint and therefore cannot be materialized by state loading.
     previous_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(dtype)
-        language_model = LLaDAModelLM(llm_config)
-        vit_model = SiglipVisionModel(vit_config)
+        with init_empty_weights(include_buffers=False):
+            language_model = LLaDAModelLM(llm_config)
+            vit_model = SiglipVisionModel(vit_config)
+            model = LLaDAO(language_model, vit_model, None, config)
+            _convert_conv2d_to_linear_on_meta(
+                model.vit_model.vision_model.embeddings,
+                vit_config,
+            )
     finally:
         torch.set_default_dtype(previous_dtype)
-    model = LLaDAO(language_model, vit_model, None, config)
-    model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config)
-    missing, unexpected = load_model(model, str(checkpoint_path), strict=True, device="cpu")
-    if missing or unexpected:
-        raise RuntimeError(f"checkpoint mismatch: missing={missing}, unexpected={unexpected}")
-    removed_parameters = strip_unused_generation_experts(model)
+    removed_parameters = load_strict_pruned_checkpoint(model, checkpoint_path)
     print(
         "stripped unused LLaDA-o generation experts: "
         f"{removed_parameters:,} parameters "
