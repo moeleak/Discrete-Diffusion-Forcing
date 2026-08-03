@@ -316,19 +316,32 @@ def forward_masked_logits(
         0, dtype=torch.long, device=understanding_indexes.device
     )
     # This path always consumes the packed training representation, including
-    # the block/bidirectional attention mask.  Do not rely on Module.training
-    # for dispatch here: reconstruction diagnostics intentionally put the
-    # wrapper in eval mode to disable dropout, while LLaDA-o's generic
-    # ``forward`` switches to the incompatible KV-cache inference signature in
-    # eval mode.
-    hidden, _ = base.language_model.forward_train(
-        packed_sequence=packed_sequence,
-        sample_lens=batch["sample_lens"],
-        attention_mask=attention_mask,
-        packed_position_ids=batch["packed_position_ids"],
-        packed_und_token_indexes=understanding_indexes,
-        packed_gen_token_indexes=empty_generation_indexes,
-    )
+    # the block/bidirectional attention mask.  Reconstruction diagnostics put
+    # the wrapper in eval mode to disable LoRA dropout, but LLaDA-o uses the
+    # training flag at every nested model/layer/attention module to choose
+    # between packed and KV-cache signatures.  Flip only those dispatchers'
+    # flags directly (not recursively via train()) so dropout stays disabled.
+    dispatchers = [
+        module
+        for module in base.language_model.modules()
+        if callable(getattr(module, "forward_train", None))
+        and callable(getattr(module, "forward_inference", None))
+    ]
+    dispatcher_states = [module.training for module in dispatchers]
+    try:
+        for module in dispatchers:
+            module.training = True
+        hidden, _ = base.language_model(
+            packed_sequence=packed_sequence,
+            sample_lens=batch["sample_lens"],
+            attention_mask=attention_mask,
+            packed_position_ids=batch["packed_position_ids"],
+            packed_und_token_indexes=understanding_indexes,
+            packed_gen_token_indexes=empty_generation_indexes,
+        )
+    finally:
+        for module, training in zip(dispatchers, dispatcher_states, strict=True):
+            module.training = training
     return base.language_model.lm_head(hidden[batch["ce_loss_indexes"].long()])
 
 

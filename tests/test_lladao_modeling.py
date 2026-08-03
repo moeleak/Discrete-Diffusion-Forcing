@@ -20,20 +20,45 @@ from lladao_d2f.modeling import (
 
 
 def test_masked_logits_use_packed_forward_while_model_is_in_eval_mode() -> None:
+    class NestedDispatcher(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dropout = nn.Dropout(0.5)
+            self.forward_train_called = False
+
+        def forward(self, *args, **kwargs):
+            if self.training:
+                return self.forward_train(*args, **kwargs)
+            raise AssertionError("nested dispatcher selected inference forward")
+
+        def forward_train(self, **kwargs):
+            self.forward_train_called = True
+            assert self.dropout.training is False
+            return kwargs["packed_sequence"] + 1
+
+        def forward_inference(self, **kwargs):
+            raise AssertionError("nested inference forward must not be used")
+
     class LanguageModel(nn.Module):
         def __init__(self) -> None:
             super().__init__()
+            self.model = NestedDispatcher()
             self.lm_head = nn.Identity()
             self.forward_train_called = False
 
         def forward(self, *args, **kwargs):
-            raise AssertionError("mode-dependent forward must not be used")
+            if self.training:
+                return self.forward_train(*args, **kwargs)
+            raise AssertionError("outer dispatcher selected inference forward")
 
         def forward_train(self, **kwargs):
             self.forward_train_called = True
             assert kwargs["sample_lens"] == [3]
             assert kwargs["attention_mask"] is attention_mask
-            return kwargs["packed_sequence"] + 1, None
+            return self.model(**kwargs), None
+
+        def forward_inference(self, **kwargs):
+            raise AssertionError("outer inference forward must not be used")
 
     class Model(nn.Module):
         def __init__(self) -> None:
@@ -54,6 +79,11 @@ def test_masked_logits_use_packed_forward_while_model_is_in_eval_mode() -> None:
     logits = forward_masked_logits(model, packed_sequence, batch, attention_mask)
 
     assert model.language_model.forward_train_called
+    assert model.language_model.model.forward_train_called
+    assert model.training is False
+    assert model.language_model.training is False
+    assert model.language_model.model.training is False
+    assert model.language_model.model.dropout.training is False
     assert torch.equal(logits, torch.tensor([[4.0, 5.0], [6.0, 7.0]]))
 
 
