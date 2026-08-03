@@ -11,11 +11,50 @@ from torch import nn
 from lladao_d2f.modeling import (
     _convert_conv2d_to_linear_on_meta,
     combine_d2f_and_action_losses,
+    forward_masked_logits,
     full_response_reconstruction_metrics,
     load_strict_pruned_checkpoint,
     strip_unused_generation_experts,
     teacher_distillation_loss,
 )
+
+
+def test_masked_logits_use_packed_forward_while_model_is_in_eval_mode() -> None:
+    class LanguageModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lm_head = nn.Identity()
+            self.forward_train_called = False
+
+        def forward(self, *args, **kwargs):
+            raise AssertionError("mode-dependent forward must not be used")
+
+        def forward_train(self, **kwargs):
+            self.forward_train_called = True
+            assert kwargs["sample_lens"] == [3]
+            assert kwargs["attention_mask"] is attention_mask
+            return kwargs["packed_sequence"] + 1, None
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.language_model = LanguageModel()
+
+    attention_mask = object()
+    model = Model().eval()
+    packed_sequence = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    batch = {
+        "packed_text_indexes": torch.tensor([0, 2]),
+        "packed_vit_token_indexes": torch.tensor([1]),
+        "sample_lens": [3],
+        "packed_position_ids": torch.tensor([0, 1, 2]),
+        "ce_loss_indexes": torch.tensor([1, 2]),
+    }
+
+    logits = forward_masked_logits(model, packed_sequence, batch, attention_mask)
+
+    assert model.language_model.forward_train_called
+    assert torch.equal(logits, torch.tensor([[4.0, 5.0], [6.0, 7.0]]))
 
 
 class _ToyUnderstandingModel(nn.Module):

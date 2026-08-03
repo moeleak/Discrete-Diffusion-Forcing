@@ -315,7 +315,13 @@ def forward_masked_logits(
     empty_generation_indexes = torch.empty(
         0, dtype=torch.long, device=understanding_indexes.device
     )
-    hidden, _ = base.language_model(
+    # This path always consumes the packed training representation, including
+    # the block/bidirectional attention mask.  Do not rely on Module.training
+    # for dispatch here: reconstruction diagnostics intentionally put the
+    # wrapper in eval mode to disable dropout, while LLaDA-o's generic
+    # ``forward`` switches to the incompatible KV-cache inference signature in
+    # eval mode.
+    hidden, _ = base.language_model.forward_train(
         packed_sequence=packed_sequence,
         sample_lens=batch["sample_lens"],
         attention_mask=attention_mask,
