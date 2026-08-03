@@ -324,8 +324,8 @@ def forward_masked_logits(
     dispatchers = [
         module
         for module in base.language_model.modules()
-        if callable(getattr(module, "forward_train", None))
-        and callable(getattr(module, "forward_inference", None))
+        if callable(getattr(type(module), "forward_train", None))
+        and callable(getattr(type(module), "forward_inference", None))
     ]
     dispatcher_states = [module.training for module in dispatchers]
     try:
