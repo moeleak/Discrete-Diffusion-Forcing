@@ -160,6 +160,129 @@ def test_padded_token_masks_match_oracle_on_cuda() -> None:
     _assert_padded_token_mask_matches_oracle("cuda")
 
 
+@pytest.fixture
+def fresh_dynamo_cache():
+    import torch._dynamo
+
+    torch._dynamo.reset()
+    try:
+        yield
+    finally:
+        torch._dynamo.reset()
+
+
+def test_segmented_prefix_visibility_matches_training_contract(
+    fresh_dynamo_cache,
+) -> None:
+    del fresh_dynamo_cache
+    sample_len = 10
+    padded_length = 128
+    training_mask = create_training_block_mask(
+        [sample_len],
+        [[(6, 4)]],
+        2,
+        prefix_segments=[
+            [
+                (0, 3, "image"),
+                (3, 2, "image"),
+                (5, 1, "prompt"),
+            ]
+        ],
+        num_heads=1,
+        device="cpu",
+    )
+    actual = create_mask(
+        training_mask.mask_mod,
+        B=1,
+        H=1,
+        Q_LEN=padded_length,
+        KV_LEN=padded_length,
+        device="cpu",
+    )[0, 0]
+    expected = torch.zeros(
+        (padded_length, padded_length),
+        dtype=torch.bool,
+    )
+    expected[0:3, 0:3] = True
+    expected[3:5, 0:5] = True
+    expected[5, 0:6] = True
+    expected[6:8, 0:8] = True
+    expected[8:10, 0:10] = True
+
+    assert torch.equal(actual, expected)
+
+
+def test_segmented_prefix_applies_to_samples_without_a_response(
+    fresh_dynamo_cache,
+) -> None:
+    del fresh_dynamo_cache
+    training_mask = create_training_block_mask(
+        [5],
+        [[]],
+        2,
+        prefix_segments=[[(0, 3, "image"), (3, 2, "prompt")]],
+        num_heads=1,
+        device="cpu",
+    )
+    actual = create_mask(
+        training_mask.mask_mod,
+        B=1,
+        H=1,
+        Q_LEN=128,
+        KV_LEN=128,
+        device="cpu",
+    )[0, 0]
+    expected = torch.zeros((128, 128), dtype=torch.bool)
+    expected[0:3, 0:3] = True
+    expected[3:5, 0:5] = True
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("segments", "message"),
+    [
+        ([(1, 2, "image"), (3, 3, "prompt")], "start at zero"),
+        ([(0, 3, "image"), (4, 2, "prompt")], "contiguous"),
+        ([(0, 3, "image"), (3, 2, "prompt")], "complete sample prefix"),
+        ([(0, 3, "video"), (3, 3, "prompt")], "either 'image' or 'prompt'"),
+        ([(0, 0, "image"), (0, 6, "prompt")], "must be positive"),
+        ([(0, 3, "prompt"), (3, 3, "image")], "must precede prompt"),
+    ],
+)
+def test_segmented_prefix_metadata_is_validated(segments, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        create_training_block_mask(
+            [10],
+            [[(6, 4)]],
+            2,
+            prefix_segments=[segments],
+            num_heads=1,
+            device="cpu",
+        )
+
+
+def test_empty_prefix_segment_entry_keeps_legacy_visibility(fresh_dynamo_cache) -> None:
+    del fresh_dynamo_cache
+    legacy = create_training_block_mask(
+        [10],
+        [[(6, 4)]],
+        2,
+        num_heads=1,
+        device="cpu",
+    )
+    explicit_empty = create_training_block_mask(
+        [10],
+        [[(6, 4)]],
+        2,
+        prefix_segments=[[]],
+        num_heads=1,
+        device="cpu",
+    )
+
+    assert torch.equal(legacy.to_dense(), explicit_empty.to_dense())
+
+
 def test_compiled_masks_reuse_exact_lengths_within_one_bucket() -> None:
     """Changing valid lengths must not create one Dynamo graph per batch."""
     import torch._dynamo

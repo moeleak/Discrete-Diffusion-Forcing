@@ -528,6 +528,7 @@ class LLaDAOGuiD2FModel(nn.Module):
             batch["sample_lens"],
             batch["d2f_response_spans"],
             self.block_size,
+            prefix_segments=batch.get("d2f_prefix_segments"),
             num_heads=base.num_heads,
             device=packed_sequence.device,
         )

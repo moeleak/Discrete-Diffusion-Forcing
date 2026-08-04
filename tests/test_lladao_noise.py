@@ -95,6 +95,87 @@ def test_full_response_corruption_masks_and_supervises_json_through_eos() -> Non
     assert bool(result["content_ce_mask"][3])
 
 
+def test_reserved_response_slots_remain_masked_and_outside_loss() -> None:
+    batch = _fully_supervised_batch()
+    batch["packed_text_ids"] = torch.cat(
+        [batch["packed_text_ids"], torch.tensor([999, 999])]
+    )
+    batch["packed_text_indexes"] = torch.arange(8)
+    batch["sample_lens"] = [8]
+    batch["d2f_response_spans"] = [[(0, 8)]]
+    batch["d2f_response_target_lengths"] = [[6]]
+
+    result = rebuild_and_corrupt_responses(
+        batch,
+        mask_id=999,
+        block_size=16,
+        full_response_mask_probability=1.0,
+    )
+
+    assert torch.equal(result["ce_loss_indexes"], torch.arange(1, 6))
+    assert torch.equal(result["packed_label_ids"], torch.tensor([11, 12, 13, 14, 15]))
+    assert bool((result["packed_text_ids"][1:] == 999).all())
+    assert not bool(torch.isin(torch.tensor([6, 7]), result["ce_loss_indexes"]).any())
+    assert result["full_response_masked_count"].item() == 1
+
+
+def test_reserved_response_slots_never_enter_random_corruption_loss() -> None:
+    batch = _fully_supervised_batch()
+    batch["packed_text_ids"] = torch.cat(
+        [batch["packed_text_ids"], torch.tensor([999, 999])]
+    )
+    batch["packed_text_indexes"] = torch.arange(8)
+    batch["sample_lens"] = [8]
+    batch["d2f_response_spans"] = [[(0, 8)]]
+    batch["d2f_response_target_lengths"] = [[6]]
+
+    for seed in range(10):
+        torch.manual_seed(seed)
+        result = rebuild_and_corrupt_responses(
+            batch,
+            mask_id=999,
+            block_size=2,
+        )
+        assert bool((result["ce_loss_indexes"] < 6).all())
+        assert bool((result["packed_text_ids"][6:] == 999).all())
+
+
+@pytest.mark.parametrize(
+    ("target_lengths", "message"),
+    [
+        ([[9]], "cannot exceed"),
+        ([[1]], "BOS and answer"),
+        ([[]], "must match each sample"),
+    ],
+)
+def test_response_target_lengths_are_validated(target_lengths, message) -> None:
+    batch = _fully_supervised_batch()
+    batch["d2f_response_target_lengths"] = target_lengths
+
+    with pytest.raises(ValueError, match=message):
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+
+
+def test_reserved_response_slots_must_be_unsupervised_masks() -> None:
+    batch = _fully_supervised_batch()
+    batch["packed_text_ids"] = torch.cat(
+        [batch["packed_text_ids"], torch.tensor([42, 999])]
+    )
+    batch["packed_text_indexes"] = torch.arange(8)
+    batch["sample_lens"] = [8]
+    batch["d2f_response_spans"] = [[(0, 8)]]
+    batch["d2f_response_target_lengths"] = [[6]]
+
+    with pytest.raises(ValueError, match="must contain only MASK"):
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+
+    batch["packed_text_ids"][6] = 999
+    batch["ce_loss_indexes"] = torch.arange(1, 7)
+    batch["packed_label_ids"] = torch.tensor([11, 12, 13, 14, 15, 16])
+    with pytest.raises(ValueError, match="cannot be supervised"):
+        rebuild_and_corrupt_responses(batch, mask_id=999, block_size=2)
+
+
 @pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan")])
 def test_full_response_probability_must_be_valid(probability: float) -> None:
     with pytest.raises(ValueError, match="between 0 and 1"):

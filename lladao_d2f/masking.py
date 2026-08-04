@@ -72,12 +72,23 @@ def create_training_block_mask(
     response_spans: Sequence[Sequence[tuple[int, int]]],
     block_size: int,
     *,
+    prefix_segments: Sequence[Sequence[tuple[int, int, str]]] | None = None,
     num_heads: int,
     device: torch.device | str,
 ):
-    """Create a packed FlexAttention mask for multimodal D2F training."""
+    """Create a packed FlexAttention mask for multimodal D2F training.
+
+    ``prefix_segments`` optionally partitions each sample's prefix into local
+    ``(start, length, kind)`` spans.  Prefix segments are causal between
+    segments and bidirectional within a segment, matching sequential image
+    prefill followed by prompt prefill.  Response queries see the complete
+    prefix.  Omitting the metadata preserves the legacy fully bidirectional
+    prefix.
+    """
     if len(sample_lens) != len(response_spans):
         raise ValueError("sample_lens and response_spans must have equal length")
+    if prefix_segments is not None and len(sample_lens) != len(prefix_segments):
+        raise ValueError("sample_lens and prefix_segments must have equal length")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
 
@@ -85,6 +96,8 @@ def create_training_block_mask(
     local_positions: list[int] = []
     response_starts: list[int] = []
     response_ends: list[int] = []
+    prefix_segment_ids: list[int] = []
+    segmented_prefixes: list[bool] = []
     for document_id, (sample_len, spans) in enumerate(zip(sample_lens, response_spans)):
         sample_len = int(sample_len)
         if sample_len < 0:
@@ -98,10 +111,52 @@ def create_training_block_mask(
             end = start + length
         else:
             start = end = -1
+        sample_segment_ids = [-1] * sample_len
+        sample_segments = () if prefix_segments is None else prefix_segments[document_id]
+        uses_segmented_prefix = bool(sample_segments)
+        if uses_segmented_prefix:
+            prefix_end = start if spans else sample_len
+            segment_cursor = 0
+            saw_prompt_segment = False
+            for segment_id, segment in enumerate(sample_segments):
+                if len(segment) != 3:
+                    raise ValueError(
+                        "prefix segments must be (start, length, kind) triples"
+                    )
+                segment_start, segment_length, segment_kind = segment
+                segment_start = int(segment_start)
+                segment_length = int(segment_length)
+                if segment_kind not in {"image", "prompt"}:
+                    raise ValueError(
+                        "prefix segment kind must be either 'image' or 'prompt'"
+                    )
+                if segment_kind == "prompt":
+                    saw_prompt_segment = True
+                elif saw_prompt_segment:
+                    raise ValueError(
+                        "image prefix segments must precede prompt segments"
+                    )
+                if segment_length <= 0:
+                    raise ValueError("prefix segment lengths must be positive")
+                if segment_start != segment_cursor:
+                    raise ValueError(
+                        "prefix segments must be ordered, contiguous, and start at zero"
+                    )
+                segment_end = segment_start + segment_length
+                if segment_end > prefix_end:
+                    raise ValueError("prefix segment extends outside the sample prefix")
+                sample_segment_ids[segment_start:segment_end] = [
+                    segment_id
+                ] * segment_length
+                segment_cursor = segment_end
+            if segment_cursor != prefix_end:
+                raise ValueError("prefix segments must cover the complete sample prefix")
         document_ids.extend([document_id] * sample_len)
         local_positions.extend(range(sample_len))
         response_starts.extend([start] * sample_len)
         response_ends.extend([end] * sample_len)
+        prefix_segment_ids.extend(sample_segment_ids)
+        segmented_prefixes.extend([uses_segmented_prefix] * sample_len)
 
     total_length = sum(map(int, sample_lens))
     padded_length = _padded_mask_length(total_length)
@@ -113,10 +168,14 @@ def create_training_block_mask(
     local_positions.extend([-1] * metadata_padding)
     response_starts.extend([-1] * metadata_padding)
     response_ends.extend([-1] * metadata_padding)
+    prefix_segment_ids.extend([-1] * metadata_padding)
+    segmented_prefixes.extend([False] * metadata_padding)
     doc = torch.tensor(document_ids, device=device, dtype=torch.int32)
     local = torch.tensor(local_positions, device=device, dtype=torch.int32)
     starts = torch.tensor(response_starts, device=device, dtype=torch.int32)
     ends = torch.tensor(response_ends, device=device, dtype=torch.int32)
+    segment_ids = torch.tensor(prefix_segment_ids, device=device, dtype=torch.int32)
+    segmented = torch.tensor(segmented_prefixes, device=device, dtype=torch.bool)
     # Keep the exact, unpadded length out of the Python closure guards used by
     # create_block_mask(_compile=True).  A Python integer here specializes the
     # compiled helper once per batch length and eventually exhausts Dynamo's
@@ -133,21 +192,29 @@ def create_training_block_mask(
         no_response = start < 0
         query_local = local[query_index]
         key_local = local[key_index]
-        query_prefix = query_local < start
-        key_prefix = key_local < start
-        query_response = (query_local >= start) & (query_local < end)
-        key_response = (key_local >= start) & (key_local < end)
+        query_prefix = no_response | (query_local < start)
+        key_prefix = no_response | (key_local < start)
+        query_response = (~no_response) & (query_local >= start) & (query_local < end)
+        key_response = (~no_response) & (key_local >= start) & (key_local < end)
         query_block = torch.div(query_local - start, block_size, rounding_mode="floor")
         key_block = torch.div(key_local - start, block_size, rounding_mode="floor")
         response_allowed = query_response & (
             key_prefix | (key_response & (key_block <= query_block))
         )
-        prefix_allowed = query_prefix & key_prefix
+        segmented_prefix_allowed = query_prefix & key_prefix & (
+            segment_ids[key_index] <= segment_ids[query_index]
+        )
+        legacy_prefix_allowed = query_prefix & key_prefix
+        prefix_allowed = torch.where(
+            segmented[query_index],
+            segmented_prefix_allowed,
+            legacy_prefix_allowed,
+        )
         return (
             valid_query
             & valid_key
             & same_document
-            & (no_response | prefix_allowed | response_allowed)
+            & (prefix_allowed | response_allowed)
         )
 
     return create_block_mask(

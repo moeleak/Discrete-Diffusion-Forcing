@@ -101,6 +101,26 @@ def rebuild_and_corrupt_responses(
     response_spans: Sequence[Sequence[tuple[int, int]]] = batch["d2f_response_spans"]
     if len(sample_lens) != len(response_spans):
         raise ValueError("response span metadata does not match packed samples")
+    response_target_lengths = batch.get("d2f_response_target_lengths")
+    if response_target_lengths is None:
+        normalized_target_lengths = [
+            [int(length) for _, length in spans]
+            for spans in response_spans
+        ]
+    else:
+        if len(response_target_lengths) != len(response_spans):
+            raise ValueError(
+                "response target length metadata does not match packed samples"
+            )
+        normalized_target_lengths = []
+        for spans, target_lengths in zip(response_spans, response_target_lengths):
+            if len(target_lengths) != len(spans):
+                raise ValueError(
+                    "response target lengths must match each sample's response spans"
+                )
+            normalized_target_lengths.append(
+                [int(target_length) for target_length in target_lengths]
+            )
 
     new_indexes: list[torch.Tensor] = []
     new_labels: list[torch.Tensor] = []
@@ -114,23 +134,58 @@ def rebuild_and_corrupt_responses(
     response_count = 0
     full_response_masked_count = 0
     document_offset = 0
-    for sample_len, spans in zip(sample_lens, response_spans):
+    for sample_len, spans, target_lengths in zip(
+        sample_lens,
+        response_spans,
+        normalized_target_lengths,
+    ):
         if not spans:
             document_offset += int(sample_len)
             continue
         if len(spans) != 1:
             raise ValueError("lladao_gui D2F currently supports one response per sample")
         local_start, response_length = map(int, spans[0])
-        if response_length <= 1:
+        target_length = target_lengths[0]
+        if target_length <= 1:
             raise ValueError("D2F response span must contain BOS and answer tokens")
-        absolute_positions = torch.arange(
+        if target_length > response_length:
+            raise ValueError(
+                "D2F response target length cannot exceed its response span"
+            )
+        full_absolute_positions = torch.arange(
             document_offset + local_start,
             document_offset + local_start + response_length,
             device=packed_indexes.device,
         )
-        packed_offsets = torch.searchsorted(packed_indexes, absolute_positions)
-        if not torch.equal(packed_indexes[packed_offsets], absolute_positions):
+        full_packed_offsets = torch.searchsorted(
+            packed_indexes,
+            full_absolute_positions,
+        )
+        if (
+            len(full_packed_offsets)
+            and int(full_packed_offsets[-1]) >= len(packed_indexes)
+        ) or not torch.equal(
+            packed_indexes[full_packed_offsets],
+            full_absolute_positions,
+        ):
             raise ValueError("D2F response span must contain only text tokens")
+        tail_absolute_positions = full_absolute_positions[target_length:]
+        tail_packed_offsets = full_packed_offsets[target_length:]
+        if len(tail_absolute_positions):
+            if bool(torch.isin(tail_absolute_positions, original_loss_indexes).any()):
+                raise ValueError(
+                    "reserved response MASK slots cannot be supervised targets"
+                )
+            if not bool((clean_ids[tail_packed_offsets] == mask_id).all()):
+                raise ValueError(
+                    "reserved response slots must contain only MASK tokens"
+                )
+        absolute_positions = torch.arange(
+            document_offset + local_start,
+            document_offset + local_start + target_length,
+            device=packed_indexes.device,
+        )
+        packed_offsets = full_packed_offsets[:target_length]
         clean_response = clean_ids[packed_offsets]
         response_group_id = response_count
         response_count += 1
@@ -152,24 +207,24 @@ def rebuild_and_corrupt_responses(
                     "including EOS, to be supervised"
                 )
             probability_per_token = torch.ones(
-                response_length,
+                target_length,
                 device=clean_response.device,
                 dtype=torch.float32,
             )
             random_masked = torch.ones(
-                response_length,
+                target_length,
                 device=clean_response.device,
                 dtype=torch.bool,
             )
             full_response_masked_count += 1
         else:
-            num_blocks = (response_length + block_size - 1) // block_size
+            num_blocks = (target_length + block_size - 1) // block_size
             probabilities = _monotonic_probabilities(num_blocks, clean_response.device)
             probability_per_token = probabilities.repeat_interleave(block_size)[
-                :response_length
+                :target_length
             ]
             random_masked = (
-                torch.rand(response_length, device=clean_response.device)
+                torch.rand(target_length, device=clean_response.device)
                 < probability_per_token
             )
         # LLaDA-o uses the response BOS as a clean anchor in the first block.
@@ -177,7 +232,7 @@ def rebuild_and_corrupt_responses(
         random_masked[0] = False
         if not bool(random_masked.any()):
             random_masked[
-                torch.randint(1, response_length, (), device=clean_response.device)
+                torch.randint(1, target_length, (), device=clean_response.device)
             ] = True
         forced_action_masked = torch.isin(absolute_positions, action_indexes)
         forced_content_masked = torch.isin(absolute_positions, content_indexes)

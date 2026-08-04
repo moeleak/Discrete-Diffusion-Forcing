@@ -9,6 +9,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from lladao_d2f.modeling import (
+    LLaDAOGuiD2FModel,
     _convert_conv2d_to_linear_on_meta,
     combine_d2f_and_action_losses,
     forward_masked_logits,
@@ -17,6 +18,77 @@ from lladao_d2f.modeling import (
     strip_unused_generation_experts,
     teacher_distillation_loss,
 )
+
+
+def test_training_wrapper_forwards_optional_prefix_segments(monkeypatch) -> None:
+    import lladao_d2f.modeling as modeling
+
+    prefix_segments = [[(0, 3, "image"), (3, 2, "prompt")]]
+    rebuilt_batch = {
+        "sample_lens": [7],
+        "d2f_response_spans": [[(5, 2)]],
+        "d2f_prefix_segments": prefix_segments,
+        "packed_label_ids": torch.tensor([1]),
+        "ce_loss_weights": torch.ones(1),
+        "action_ce_mask": torch.zeros(1, dtype=torch.bool),
+        "content_ce_mask": torch.zeros(1, dtype=torch.bool),
+        "full_response_ce_mask": torch.zeros(1, dtype=torch.bool),
+        "full_response_group_ids": torch.full((1,), -1, dtype=torch.long),
+        "d2f_response_count": torch.ones((), dtype=torch.long),
+        "full_response_masked_count": torch.zeros((), dtype=torch.long),
+    }
+    captured = {}
+    monkeypatch.setattr(
+        modeling,
+        "rebuild_and_corrupt_responses",
+        lambda raw_batch, **kwargs: rebuilt_batch,
+    )
+    monkeypatch.setattr(
+        modeling,
+        "unwrap_lladao",
+        lambda model: SimpleNamespace(num_heads=3),
+    )
+    monkeypatch.setattr(
+        modeling,
+        "prepare_understanding_sequence",
+        lambda model, batch: torch.zeros(7, 2),
+    )
+
+    def capture_mask(sample_lens, response_spans, block_size, **kwargs):
+        captured.update(
+            sample_lens=sample_lens,
+            response_spans=response_spans,
+            block_size=block_size,
+            **kwargs,
+        )
+        return object()
+
+    monkeypatch.setattr(modeling, "create_training_block_mask", capture_mask)
+    monkeypatch.setattr(
+        modeling,
+        "forward_masked_logits",
+        lambda model, packed_sequence, batch, mask: torch.tensor([[0.0, 1.0]]),
+    )
+    monkeypatch.setattr(
+        modeling,
+        "teacher_distillation_loss",
+        lambda *args, **kwargs: torch.zeros(1),
+    )
+
+    wrapper = LLaDAOGuiD2FModel(
+        torch.nn.Identity(),
+        block_size=16,
+        distill_weight=0.0,
+        hard_ce_weight=1.0,
+    )
+    metrics = wrapper({"raw": "batch"})
+
+    assert captured["sample_lens"] == [7]
+    assert captured["response_spans"] == [[(5, 2)]]
+    assert captured["block_size"] == 16
+    assert captured["prefix_segments"] is prefix_segments
+    assert captured["num_heads"] == 3
+    assert metrics["masked_tokens"].item() == 1
 
 
 def test_masked_logits_use_packed_forward_while_model_is_in_eval_mode() -> None:
