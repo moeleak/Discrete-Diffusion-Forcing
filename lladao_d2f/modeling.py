@@ -60,25 +60,12 @@ def _summarize_checkpoint_mismatches(values: list[str], *, limit: int = 8) -> st
     return ", ".join(shown) + suffix
 
 
-def load_strict_pruned_checkpoint(
-    model: nn.Module,
-    checkpoint_path: str | Path,
-) -> int:
-    """Strictly bind a safetensors checkpoint to a pruned meta model.
+def _validate_checkpoint_tensors(
+    expected: dict[str, torch.Tensor],
+    checkpoint: dict[str, torch.Tensor],
+) -> None:
+    """Reject every key, shape, or dtype mismatch before assigning tensors."""
 
-    Validation is deliberately performed against the complete model before
-    pruning.  This prevents generation-expert keys, or any other unexpected
-    checkpoint content, from being silently ignored.  Once validated, only
-    understanding-path tensors are assigned, so generation experts never
-    need an allocated CPU copy.
-    """
-    from safetensors.torch import load_file
-
-    checkpoint = load_file(
-        str(Path(checkpoint_path).expanduser().resolve()),
-        device="cpu",
-    )
-    expected = model.state_dict()
     expected_keys = set(expected)
     checkpoint_keys = set(checkpoint)
     missing = sorted(expected_keys - checkpoint_keys)
@@ -106,15 +93,18 @@ def load_strict_pruned_checkpoint(
     if problems:
         raise RuntimeError("checkpoint mismatch: " + "; ".join(problems))
 
-    removed_parameters = strip_unused_generation_experts(model)
-    retained_expected = model.state_dict()
-    retained = {key: checkpoint[key] for key in retained_expected}
-    del checkpoint, expected, retained_expected
-    incompatible = model.load_state_dict(retained, strict=True, assign=True)
-    del retained
+
+def _assign_strict_checkpoint(
+    model: nn.Module,
+    checkpoint: dict[str, torch.Tensor],
+) -> None:
+    expected = model.state_dict()
+    _validate_checkpoint_tensors(expected, checkpoint)
+    del expected
+    incompatible = model.load_state_dict(checkpoint, strict=True, assign=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:
         raise RuntimeError(
-            "checkpoint mismatch after pruning: "
+            "checkpoint mismatch while assigning tensors: "
             f"missing={incompatible.missing_keys}, "
             f"unexpected={incompatible.unexpected_keys}"
         )
@@ -132,7 +122,80 @@ def load_strict_pruned_checkpoint(
             "checkpoint load left tensors on meta: "
             + _summarize_checkpoint_mismatches(meta_tensors)
         )
+
+
+def load_strict_pruned_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+) -> int:
+    """Strictly bind a safetensors checkpoint to a pruned meta model.
+
+    Validation is deliberately performed against the complete model before
+    pruning.  This prevents generation-expert keys, or any other unexpected
+    checkpoint content, from being silently ignored.  Once validated, only
+    understanding-path tensors are assigned, so generation experts never
+    need an allocated CPU copy.
+    """
+    from safetensors.torch import load_file
+
+    checkpoint = load_file(
+        str(Path(checkpoint_path).expanduser().resolve()),
+        device="cpu",
+    )
+    expected = model.state_dict()
+    _validate_checkpoint_tensors(expected, checkpoint)
+
+    removed_parameters = strip_unused_generation_experts(model)
+    retained = {key: checkpoint[key] for key in model.state_dict()}
+    del checkpoint, expected
+    _assign_strict_checkpoint(model, retained)
+    del retained
     return removed_parameters
+
+
+def load_strict_understanding_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+) -> int:
+    """Load a full-parameter understanding-only checkpoint into a meta model.
+
+    Unlike :func:`load_strict_pruned_checkpoint`, this format intentionally
+    omits every unused ``*_moe_gen`` tensor.  The omission is accepted only as
+    a complete set: after pruning, all remaining keys, shapes, and dtypes must
+    match exactly.
+    """
+    from safetensors.torch import load_file
+
+    removed_parameters = strip_unused_generation_experts(model)
+    checkpoint = load_file(
+        str(Path(checkpoint_path).expanduser().resolve()),
+        device="cpu",
+    )
+    _assign_strict_checkpoint(model, checkpoint)
+    del checkpoint
+    return removed_parameters
+
+
+def load_strict_understanding_model_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+) -> tuple[int, str]:
+    """Load either supported strict checkpoint format for understanding use.
+
+    Original LLaDA-o checkpoints contain generation experts and are validated
+    in full before those experts are pruned.  Full-parameter checkpoints
+    exported by understanding-only training contain no generation-expert keys
+    and are validated against the exact pruned model instead.  A checkpoint
+    may not silently mix the two formats.
+    """
+    from safetensors import safe_open
+
+    resolved = Path(checkpoint_path).expanduser().resolve()
+    with safe_open(str(resolved), framework="pt", device="cpu") as handle:
+        keys = list(handle.keys())
+    if any("_moe_gen" in key for key in keys):
+        return load_strict_pruned_checkpoint(model, resolved), "complete"
+    return load_strict_understanding_checkpoint(model, resolved), "understanding-only"
 
 
 def _convert_conv2d_to_linear_on_meta(embeddings: nn.Module, config: Any) -> None:
@@ -219,9 +282,12 @@ def load_base_model(
             )
     finally:
         torch.set_default_dtype(previous_dtype)
-    removed_parameters = load_strict_pruned_checkpoint(model, checkpoint_path)
+    removed_parameters, checkpoint_format = load_strict_understanding_model_checkpoint(
+        model, checkpoint_path
+    )
     print(
-        "stripped unused LLaDA-o generation experts: "
+        f"loaded {checkpoint_format} LLaDA-o checkpoint; "
+        "stripped unused generation experts: "
         f"{removed_parameters:,} parameters "
         f"({removed_parameters * 2 / 2**30:.2f} GiB at bf16)",
         flush=True,
@@ -279,7 +345,6 @@ def unwrap_lladao(model):
     return model
 
 
-@torch.no_grad()
 def prepare_understanding_sequence(model, batch: dict[str, Any]) -> torch.Tensor:
     base = unwrap_lladao(model)
     packed_text_ids = batch["packed_text_ids"]
@@ -489,11 +554,11 @@ def teacher_distillation_loss(
 
 
 class LLaDAOGuiD2FModel(nn.Module):
-    """DDP-safe teacher/student wrapper around a single PEFT LLaDA-o model."""
+    """Distributed-safe D2F wrapper around a PEFT or full LLaDA-o model."""
 
     def __init__(
         self,
-        peft_model,
+        model,
         *,
         mask_id: int = 126336,
         block_size: int = 16,
@@ -505,7 +570,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         content_ce_use_action_class_weight: bool = True,
     ):
         super().__init__()
-        self.peft_model = peft_model
+        self.model = model
         self.mask_id = mask_id
         self.block_size = block_size
         self.distill_weight = distill_weight
@@ -515,6 +580,12 @@ class LLaDAOGuiD2FModel(nn.Module):
         self.full_response_mask_probability = full_response_mask_probability
         self.content_ce_use_action_class_weight = content_ce_use_action_class_weight
 
+    @property
+    def peft_model(self):
+        """Compatibility alias for callers written before full-model training."""
+
+        return self.model
+
     def forward(self, raw_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         batch = rebuild_and_corrupt_responses(
             raw_batch,
@@ -522,8 +593,8 @@ class LLaDAOGuiD2FModel(nn.Module):
             block_size=self.block_size,
             full_response_mask_probability=self.full_response_mask_probability,
         )
-        base = unwrap_lladao(self.peft_model)
-        packed_sequence = prepare_understanding_sequence(self.peft_model, batch)
+        base = unwrap_lladao(self.model)
+        packed_sequence = prepare_understanding_sequence(self.model, batch)
         student_mask = create_training_block_mask(
             batch["sample_lens"],
             batch["d2f_response_spans"],
@@ -533,11 +604,11 @@ class LLaDAOGuiD2FModel(nn.Module):
             device=packed_sequence.device,
         )
         student_logits = forward_masked_logits(
-            self.peft_model, packed_sequence, batch, student_mask
+            self.model, packed_sequence, batch, student_mask
         )
         student_log_probabilities = torch.log_softmax(student_logits.float(), dim=-1)
         distill = teacher_distillation_loss(
-            self.peft_model,
+            self.model,
             packed_sequence,
             batch,
             student_log_probabilities,

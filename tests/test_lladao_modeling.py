@@ -14,7 +14,10 @@ from lladao_d2f.modeling import (
     combine_d2f_and_action_losses,
     forward_masked_logits,
     full_response_reconstruction_metrics,
+    load_strict_understanding_checkpoint,
+    load_strict_understanding_model_checkpoint,
     load_strict_pruned_checkpoint,
+    prepare_understanding_sequence,
     strip_unused_generation_experts,
     teacher_distillation_loss,
 )
@@ -89,6 +92,69 @@ def test_training_wrapper_forwards_optional_prefix_segments(monkeypatch) -> None
     assert captured["prefix_segments"] is prefix_segments
     assert captured["num_heads"] == 3
     assert metrics["masked_tokens"].item() == 1
+
+
+def test_training_wrapper_registers_a_generic_model_once() -> None:
+    model = nn.Linear(3, 2)
+    wrapper = LLaDAOGuiD2FModel(model)
+
+    assert wrapper.model is model
+    assert wrapper.peft_model is model
+    assert list(dict(wrapper.named_children())) == ["model"]
+    assert set(wrapper.state_dict()) == {"model.weight", "model.bias"}
+
+
+def test_understanding_sequence_preserves_full_model_gradients() -> None:
+    class Vision(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = nn.Parameter(torch.tensor(2.0))
+
+        def forward(self, *, packed_pixel_values, **kwargs):
+            return packed_pixel_values * self.scale
+
+    class LanguageBackbone(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed_tokens = nn.Embedding(8, 2)
+
+    class Language(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = LanguageBackbone()
+
+    class FullModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hidden_size = 2
+            self.language_model = Language()
+            self.vit_model = Vision()
+            self.connector = nn.Linear(2, 2, bias=False)
+            self.vit_pos_embed = nn.Embedding(4, 2)
+
+    model = FullModel()
+    batch = {
+        "sequence_length": 4,
+        "packed_text_ids": torch.tensor([1, 2]),
+        "packed_text_indexes": torch.tensor([0, 3]),
+        "packed_vit_tokens": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        "packed_vit_token_indexes": torch.tensor([1, 2]),
+        "packed_vit_position_ids": torch.tensor([0, 1]),
+        "vit_token_seqlens": torch.tensor([2]),
+    }
+
+    sequence = prepare_understanding_sequence(model, batch)
+    sequence.square().sum().backward()
+
+    parameters = {
+        "text embedding": model.language_model.model.embed_tokens.weight,
+        "vision tower": model.vit_model.scale,
+        "connector": model.connector.weight,
+        "vision position": model.vit_pos_embed.weight,
+    }
+    for label, parameter in parameters.items():
+        assert parameter.grad is not None, label
+        assert bool(parameter.grad.abs().sum() > 0), label
 
 
 def test_masked_logits_use_packed_forward_while_model_is_in_eval_mode() -> None:
@@ -201,6 +267,18 @@ def _save_toy_checkpoint(path) -> _ToyUnderstandingModel:
     return reference
 
 
+def _save_toy_understanding_checkpoint(path) -> _ToyUnderstandingModel:
+    torch.manual_seed(7)
+    reference = _ToyUnderstandingModel().to(torch.bfloat16)
+    state = {
+        name: tensor
+        for name, tensor in reference.state_dict().items()
+        if "_moe_gen" not in name
+    }
+    save_file(state, str(path))
+    return reference
+
+
 def test_strip_generation_experts_preserves_understanding_path() -> None:
     torch.manual_seed(7)
     model = _ToyUnderstandingModel()
@@ -242,6 +320,83 @@ def test_meta_checkpoint_load_is_strict_pruned_and_exact(tmp_path) -> None:
     assert not any("_moe_gen" in name for name, _ in model.named_parameters())
     assert torch.equal(model.keep.weight, reference.keep.weight)
     assert torch.equal(model.keep(inputs), reference.keep(inputs))
+
+
+def test_understanding_only_checkpoint_load_is_strict_and_exact(tmp_path) -> None:
+    checkpoint = tmp_path / "toy-understanding.safetensors"
+    reference = _save_toy_understanding_checkpoint(checkpoint)
+    model = _empty_toy()
+    inputs = torch.randn(3, 4, dtype=torch.bfloat16)
+
+    removed = load_strict_understanding_checkpoint(model, checkpoint)
+
+    assert removed == 80
+    assert not any(parameter.is_meta for parameter in model.parameters())
+    assert not any("_moe_gen" in name for name, _ in model.named_parameters())
+    assert torch.equal(model.keep.weight, reference.keep.weight)
+    assert torch.equal(model.keep(inputs), reference.keep(inputs))
+
+
+@pytest.mark.parametrize(
+    ("understanding_only", "expected_format"),
+    [(False, "complete"), (True, "understanding-only")],
+)
+def test_understanding_model_loader_dispatches_strict_formats(
+    tmp_path, understanding_only, expected_format
+) -> None:
+    checkpoint = tmp_path / "toy.safetensors"
+    if understanding_only:
+        _save_toy_understanding_checkpoint(checkpoint)
+    else:
+        _save_toy_checkpoint(checkpoint)
+
+    removed, checkpoint_format = load_strict_understanding_model_checkpoint(
+        _empty_toy(), checkpoint
+    )
+
+    assert removed == 80
+    assert checkpoint_format == expected_format
+
+
+def test_complete_checkpoint_loader_rejects_understanding_only_file(tmp_path) -> None:
+    checkpoint = tmp_path / "toy-understanding.safetensors"
+    _save_toy_understanding_checkpoint(checkpoint)
+
+    with pytest.raises(RuntimeError, match="missing"):
+        load_strict_pruned_checkpoint(_empty_toy(), checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "missing"),
+        ("unexpected", "unexpected"),
+        ("shape", "shape mismatches"),
+        ("dtype", "dtype mismatches"),
+    ],
+)
+def test_understanding_only_checkpoint_rejects_mismatch(
+    tmp_path, mutation, message
+) -> None:
+    reference = _ToyUnderstandingModel().to(torch.bfloat16)
+    state = {
+        name: tensor
+        for name, tensor in reference.state_dict().items()
+        if "_moe_gen" not in name
+    }
+    if mutation == "missing":
+        del state["keep.weight"]
+    elif mutation == "unexpected":
+        state["unexpected.weight"] = torch.zeros(1, dtype=torch.bfloat16)
+    elif mutation == "shape":
+        state["keep.weight"] = torch.zeros(3, 4, dtype=torch.bfloat16)
+    elif mutation == "dtype":
+        state["keep.weight"] = state["keep.weight"].float()
+    checkpoint = tmp_path / f"understanding-{mutation}.safetensors"
+    save_file(state, str(checkpoint))
+
+    with pytest.raises(RuntimeError, match=message):
+        load_strict_understanding_checkpoint(_empty_toy(), checkpoint)
 
 
 @pytest.mark.parametrize(
