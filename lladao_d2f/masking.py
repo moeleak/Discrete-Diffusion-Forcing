@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
 import torch
@@ -7,6 +8,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 
 FLEX_MASK_BLOCK_SIZE = 128
+_COMPILE_BLOCK_MASK = os.environ.get("LLADA_DISABLE_BLOCK_MASK_COMPILE", "0") != "1"
 
 
 def _padded_mask_length(total_length: int) -> int:
@@ -225,7 +227,7 @@ def create_training_block_mask(
         KV_LEN=total_length,
         device=device,
         BLOCK_SIZE=FLEX_MASK_BLOCK_SIZE,
-        _compile=True,
+        _compile=_COMPILE_BLOCK_MASK,
     )
 
 
@@ -258,5 +260,5 @@ def create_full_document_mask(
         KV_LEN=total_length,
         device=device,
         BLOCK_SIZE=FLEX_MASK_BLOCK_SIZE,
-        _compile=True,
+        _compile=_COMPILE_BLOCK_MASK,
     )
