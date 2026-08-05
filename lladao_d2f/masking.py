@@ -9,6 +9,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 FLEX_MASK_BLOCK_SIZE = 128
 _COMPILE_BLOCK_MASK = os.environ.get("LLADA_DISABLE_BLOCK_MASK_COMPILE", "0") != "1"
+_USE_DENSE_SDPA_MASK = os.environ.get("LLADA_USE_DENSE_SDPA_MASK", "0") == "1"
 
 
 def _padded_mask_length(total_length: int) -> int:
@@ -35,6 +36,85 @@ def block_attention_allowed(
     query_block = (query_position - prefix_length) // block_size
     key_block = (key_position - prefix_length) // block_size
     return key_block <= query_block
+
+
+def _dense_training_masks(
+    sample_lens: Sequence[int],
+    response_spans: Sequence[Sequence[tuple[int, int]]],
+    block_size: int,
+    *,
+    prefix_segments: Sequence[Sequence[tuple[int, int, str]]] | None,
+    device: torch.device | str,
+) -> list[torch.Tensor]:
+    """Build additive per-sample masks for PyTorch memory-efficient SDPA.
+
+    This is algebraically the same visibility rule as ``create_training_block_mask``.
+    Returning a Python list selects LLaDA-o's existing SDPA path, avoiding
+    shape-specialized FlexAttention compilation and its unfused score matrix.
+    """
+    masks: list[torch.Tensor] = []
+    for document_id, (sample_len, spans) in enumerate(zip(sample_lens, response_spans)):
+        length = int(sample_len)
+        if length < 0:
+            raise ValueError("sample lengths must be non-negative")
+        if len(spans) > 1:
+            raise ValueError("lladao_gui D2F currently supports one response per sample")
+        if spans:
+            start, response_length = map(int, spans[0])
+            if start < 0 or response_length <= 0 or start + response_length > length:
+                raise ValueError(f"invalid response span {(start, response_length)} for length {length}")
+            end = start + response_length
+        else:
+            start = end = -1
+
+        positions = torch.arange(length, device=device, dtype=torch.int64)
+        query = positions[:, None]
+        key = positions[None, :]
+        if start < 0:
+            allowed = torch.ones((length, length), device=device, dtype=torch.bool)
+        else:
+            segment_ids = torch.full((length,), -1, device=device, dtype=torch.int64)
+            sample_segments = () if prefix_segments is None else prefix_segments[document_id]
+            cursor = 0
+            for segment_id, segment in enumerate(sample_segments):
+                if len(segment) != 3:
+                    raise ValueError("prefix segments must be (start, length, kind) triples")
+                segment_start, segment_length, segment_kind = segment
+                segment_start = int(segment_start)
+                segment_length = int(segment_length)
+                if segment_kind not in {"image", "prompt"}:
+                    raise ValueError("prefix segment kind must be either 'image' or 'prompt'")
+                if segment_length <= 0 or segment_start != cursor:
+                    raise ValueError("prefix segments must be contiguous and start at zero")
+                segment_end = segment_start + segment_length
+                if segment_end > start:
+                    raise ValueError("prefix segment extends outside the sample prefix")
+                segment_ids[segment_start:segment_end] = segment_id
+                cursor = segment_end
+            if sample_segments and cursor != start:
+                raise ValueError("prefix segments must cover the complete sample prefix")
+
+            query_prefix = query < start
+            key_prefix = key < start
+            query_response = (query >= start) & (query < end)
+            key_response = (key >= start) & (key < end)
+            query_blocks = torch.div(query - start, block_size, rounding_mode="floor")
+            key_blocks = torch.div(key - start, block_size, rounding_mode="floor")
+            if sample_segments:
+                prefix_allowed = query_prefix & key_prefix & (
+                    segment_ids[None, :] <= segment_ids[:, None]
+                )
+            else:
+                prefix_allowed = query_prefix & key_prefix
+            response_allowed = query_response & (
+                key_prefix | (key_response & (key_blocks <= query_blocks))
+            )
+            allowed = prefix_allowed | response_allowed
+
+        bias = torch.zeros((length, length), device=device, dtype=torch.float32)
+        bias.masked_fill_(~allowed, torch.finfo(bias.dtype).min)
+        masks.append(bias)
+    return masks
 
 
 def build_suffix_attention_bias(
@@ -93,6 +173,14 @@ def create_training_block_mask(
         raise ValueError("sample_lens and prefix_segments must have equal length")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+    if _USE_DENSE_SDPA_MASK:
+        return _dense_training_masks(
+            sample_lens,
+            response_spans,
+            block_size,
+            prefix_segments=prefix_segments,
+            device=device,
+        )
 
     document_ids: list[int] = []
     local_positions: list[int] = []
