@@ -705,6 +705,29 @@ python generate_llada_demo_ar.py
 ```
 You can inspect these files to see how to use the D2F model for inference in your own projects.
 
+### Retrain GUI grounding LoRA on a full-parameter planner
+
+The no-Slurm launcher below starts the two-GPU/global-batch-16 GUI-grounding
+recipe with a standalone Full-parameter planner export as its base. It writes
+an expanded YAML and a combined log, and refuses to overwrite an existing run:
+
+```bash
+LLADA_FULL_CHECKPOINT=/home/ma-user/work/LLaDA-o/models/planner-full-content-v2-131674/model.safetensors \
+  bash /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/scripts/train_mllm_lladao_gui_full_checkpoint_2gpu.sh
+```
+
+The output adapter is under
+`/home/ma-user/work/LLaDA-o/runs/d2f-grounding-lora-full-content-v2-2gpu/`;
+follow the complete stdout/stderr stream with:
+
+```bash
+tail -F /home/ma-user/work/LLaDA-o/logs/d2f-grounding-lora-full-content-v2-2gpu.log
+```
+
+Set `OUTPUT_ROOT` and `LOG_FILE` to fresh absolute paths for another run. The
+script loads an understanding-only full checkpoint, then adds only the D2F
+grounding LoRA; it does not merge or retrain the planner adapter.
+
 ## 📚 Future Works
 
 - [x] Implement dLLM-suported vLLM (preliminary).
