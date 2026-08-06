@@ -728,6 +728,17 @@ Set `OUTPUT_ROOT` and `LOG_FILE` to fresh absolute paths for another run. The
 script loads an understanding-only full checkpoint, then adds only the D2F
 grounding LoRA; it does not merge or retrain the planner adapter.
 
+For a direct, no-Slurm eight-GPU allocation on mllm, run the host wrapper:
+
+```bash
+bash /home/ma-user/work/train_d2f_full_content_v2_8gpu.sh
+```
+
+It uses the same full checkpoint and writes the combined log to
+`/home/ma-user/work/LLaDA-o/logs/d2f-grounding-lora-full-content-v2-8gpu.log`.
+The wrapper requires exactly eight visible GPUs and exits before distributed
+startup if the host exposes fewer.
+
 For an eight-GPU Slurm node, submit the self-contained wrapper from the
 versioned D2F archive. It preserves the same effective global batch and sends
 the complete trainer output to one tail-able log:
