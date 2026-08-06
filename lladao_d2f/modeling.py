@@ -4,7 +4,7 @@ import importlib
 import inspect
 import re
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -415,6 +415,20 @@ def adapter_disabled(model):
     return target.disable_adapter() if hasattr(target, "disable_adapter") else nullcontext()
 
 
+@contextmanager
+def temporary_eval(module: nn.Module):
+    """Use deterministic dropout-free teacher logits, then restore training flags."""
+
+    modules = list(module.modules())
+    states = [item.training for item in modules]
+    module.eval()
+    try:
+        yield
+    finally:
+        for item, state in zip(modules, states, strict=True):
+            item.training = state
+
+
 def combine_d2f_and_action_losses(
     *,
     distill: torch.Tensor,
@@ -531,6 +545,7 @@ def teacher_distillation_loss(
     *,
     num_heads: int,
     distill_weight: float,
+    teacher_eval: bool = False,
 ) -> torch.Tensor:
     """Return tokenwise distillation loss without invoking a zero-weight teacher."""
     if distill_weight == 0.0:
@@ -542,7 +557,8 @@ def teacher_distillation_loss(
         num_heads=num_heads,
         device=packed_sequence.device,
     )
-    with torch.no_grad(), adapter_disabled(model):
+    teacher_mode = temporary_eval(model) if teacher_eval else nullcontext()
+    with torch.no_grad(), adapter_disabled(model), teacher_mode:
         teacher_logits = forward_masked_logits(
             model,
             packed_sequence,
@@ -568,6 +584,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         content_ce_weight: float = 0.0,
         full_response_mask_probability: float = 0.0,
         content_ce_use_action_class_weight: bool = True,
+        teacher_eval: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -579,6 +596,7 @@ class LLaDAOGuiD2FModel(nn.Module):
         self.content_ce_weight = content_ce_weight
         self.full_response_mask_probability = full_response_mask_probability
         self.content_ce_use_action_class_weight = content_ce_use_action_class_weight
+        self.teacher_eval = teacher_eval
 
     @property
     def peft_model(self):
@@ -614,6 +632,7 @@ class LLaDAOGuiD2FModel(nn.Module):
             student_log_probabilities,
             num_heads=base.num_heads,
             distill_weight=self.distill_weight,
+            teacher_eval=self.teacher_eval,
         )
         hard_ce = torch.nn.functional.cross_entropy(
             student_logits.float(), batch["packed_label_ids"].long(), reduction="none"
