@@ -41,7 +41,8 @@ from pathlib import Path
 
 import yaml
 
-template, output, checkpoint, lladao, root = map(Path, sys.argv[1:])
+template, output, checkpoint, lladao, root = map(Path, sys.argv[1:6])
+gradient_accumulation_steps = int(sys.argv[6])
 config = yaml.safe_load(template.read_text(encoding="utf-8"))
 paths = config["paths"]
 paths["lladao_repo"] = str(lladao.resolve())
@@ -50,7 +51,7 @@ paths["checkpoint"] = str(Path(checkpoint).resolve())
 paths["train_data"] = str((root / "data/train_ocr/mind2web").resolve())
 paths["dataset_config"] = str((lladao / "data/configs/gui_grounding_table1.yaml").resolve())
 paths["output_dir"] = str(output.parent.resolve())
-config["train"]["gradient_accumulation_steps"] = int(sys.argv[6])
+config["train"]["gradient_accumulation_steps"] = gradient_accumulation_steps
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 PY
