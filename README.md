@@ -712,7 +712,7 @@ recipe with a standalone Full-parameter planner export as its base. It writes
 an expanded YAML and a combined log, and refuses to overwrite an existing run:
 
 ```bash
-LLADA_FULL_CHECKPOINT=/home/ma-user/work/LLaDA-o/models/planner-full-content-v2-131674/model.safetensors \
+LLADAO_FULL_CHECKPOINT=/home/ma-user/work/LLaDA-o/models/planner-full-content-v2-131674/model.safetensors \
   bash /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/scripts/train_mllm_lladao_gui_full_checkpoint_2gpu.sh
 ```
 
@@ -727,6 +727,23 @@ tail -F /home/ma-user/work/LLaDA-o/logs/d2f-grounding-lora-full-content-v2-2gpu.
 Set `OUTPUT_ROOT` and `LOG_FILE` to fresh absolute paths for another run. The
 script loads an understanding-only full checkpoint, then adds only the D2F
 grounding LoRA; it does not merge or retrain the planner adapter.
+
+For an eight-GPU Slurm node, submit the self-contained wrapper from the
+versioned D2F archive. It preserves the same effective global batch and sends
+the complete trainer output to one tail-able log:
+
+```bash
+sbatch /home/guests/zhen/lladao-work/D2F-full-<commit>/scripts/train_mllm_lladao_gui_full_checkpoint_8gpu.sbatch
+tail -F /home/guests/zhen/lladao-work/logs/d2f-grounding-lora-full-content-v2-8gpu-<jobid>.log
+```
+
+The wrapper defaults to the epoch-02 Full-parameter planner export at
+`runs/planner-full-content-v2-slurm-131674/.../model.safetensors`. Override
+`LLADAO_FULL_CHECKPOINT`, `OUTPUT_ROOT`, or `LOG_FILE` when evaluating another
+checkpoint or using a fresh run directory. The underlying launcher is
+parameterized by `NUM_PROCESSES`, `GRADIENT_ACCUMULATION_STEPS`, and
+`GPU_LAUNCHER`; the Slurm wrapper sets these to `8`, `2`, and
+`train_mlladao_gui_8gpu.sh` respectively.
 
 ## 📚 Future Works
 

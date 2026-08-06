@@ -12,8 +12,11 @@ PYTHON="${PYTHON:-${ROOT}/env/bin/python}"
 ACCELERATE="${ACCELERATE:-${ROOT}/env/bin/accelerate}"
 TEMPLATE="${CONFIG_TEMPLATE:-${REPO}/D2F-train/config/lladao_gui.yaml}"
 FULL_CHECKPOINT="${LLADAO_FULL_CHECKPOINT:?set LLADAO_FULL_CHECKPOINT to the Full-parameter content-v2 model.safetensors}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-grounding-lora-full-content-v2-2gpu}"
-LOG_FILE="${LOG_FILE:-${ROOT}/logs/d2f-grounding-lora-full-content-v2-2gpu.log}"
+NUM_PROCESSES="${NUM_PROCESSES:-2}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-8}"
+GPU_LAUNCHER="${GPU_LAUNCHER:-train_mllm_lladao_gui_2gpu.sh}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/d2f-grounding-lora-full-content-v2-${NUM_PROCESSES}gpu}"
+LOG_FILE="${LOG_FILE:-${ROOT}/logs/d2f-grounding-lora-full-content-v2-${NUM_PROCESSES}gpu.log}"
 CONFIG="${OUTPUT_ROOT}/resolved-full-content-v2.yaml"
 
 die() {
@@ -32,7 +35,7 @@ mkdir -p "${OUTPUT_ROOT}" "$(dirname "${LOG_FILE}")"
 # Resolve all machine-specific paths into an auditable YAML.  The trainer then
 # uses its normal strict checkpoint loader, which accepts the understanding-
 # only full-parameter export and strips no additional trainable parameters.
-"${PYTHON}" - "${TEMPLATE}" "${CONFIG}" "${FULL_CHECKPOINT}" "${LLADAO}" "${ROOT}" <<'PY'
+"${PYTHON}" - "${TEMPLATE}" "${CONFIG}" "${FULL_CHECKPOINT}" "${LLADAO}" "${ROOT}" "${GRADIENT_ACCUMULATION_STEPS}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -47,7 +50,7 @@ paths["checkpoint"] = str(Path(checkpoint).resolve())
 paths["train_data"] = str((root / "data/train_ocr/mind2web").resolve())
 paths["dataset_config"] = str((lladao / "data/configs/gui_grounding_table1.yaml").resolve())
 paths["output_dir"] = str(output.parent.resolve())
-config["train"]["gradient_accumulation_steps"] = 8
+config["train"]["gradient_accumulation_steps"] = int(sys.argv[6])
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 PY
@@ -58,10 +61,11 @@ export ACCELERATE
 export CONFIG
 export OUTPUT_ROOT
 export LOG_FILE
-export NUM_PROCESSES=2
+export NUM_PROCESSES
+export GRADIENT_ACCUMULATION_STEPS
 export PYTHONPATH="${REPO}:${LLADAO}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 
 echo "full grounding LoRA stdout/stderr log: ${LOG_FILE}"
-exec "${REPO}/scripts/train_mllm_lladao_gui_2gpu.sh"
+exec "${REPO}/scripts/${GPU_LAUNCHER}"
