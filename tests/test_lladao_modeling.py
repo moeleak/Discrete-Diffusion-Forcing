@@ -104,6 +104,17 @@ def test_training_wrapper_registers_a_generic_model_once() -> None:
     assert set(wrapper.state_dict()) == {"model.weight", "model.bias"}
 
 
+def test_training_wrapper_keeps_frozen_teacher_out_of_student_state() -> None:
+    student = nn.Linear(3, 2)
+    teacher = nn.Linear(3, 2)
+    wrapper = LLaDAOGuiD2FModel(student, teacher=teacher)
+
+    assert wrapper.teacher is teacher
+    assert not any(parameter.requires_grad for parameter in teacher.parameters())
+    assert list(dict(wrapper.named_children())) == ["model"]
+    assert all("teacher" not in key for key in wrapper.state_dict())
+
+
 def test_understanding_sequence_preserves_full_model_gradients() -> None:
     class Vision(nn.Module):
         def __init__(self) -> None:

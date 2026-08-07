@@ -570,7 +570,16 @@ def teacher_distillation_loss(
 
 
 class LLaDAOGuiD2FModel(nn.Module):
-    """Distributed-safe D2F wrapper around a PEFT or full LLaDA-o model."""
+    """Distributed-safe D2F wrapper around a student and optional frozen teacher.
+
+    The original LoRA path used ``adapter_disabled`` to expose the frozen
+    backbone as the teacher.  That is not a teacher once every backbone
+    parameter is trainable: in full-parameter training the student would
+    silently distill from its own changing weights.  ``teacher`` is therefore
+    kept outside the registered module tree, frozen, and evaluated from its
+    own multimodal embeddings.  Keeping it unregistered prevents teacher
+    weights from entering the optimizer or portable student checkpoints.
+    """
 
     def __init__(
         self,
@@ -585,9 +594,19 @@ class LLaDAOGuiD2FModel(nn.Module):
         full_response_mask_probability: float = 0.0,
         content_ce_use_action_class_weight: bool = True,
         teacher_eval: bool = False,
+        teacher: nn.Module | None = None,
     ):
         super().__init__()
         self.model = model
+        # A frozen teacher is intentionally not registered as a child module:
+        # FSDP, optimizer grouping, DCP resume state, and portable exports must
+        # contain the trainable student only.  The object remains strongly
+        # referenced by this wrapper and is explicitly placed on CUDA by the
+        # full-parameter launcher before FSDP wrapping.
+        if teacher is not None:
+            teacher.requires_grad_(False)
+            teacher.eval()
+        object.__setattr__(self, "_teacher", teacher)
         self.mask_id = mask_id
         self.block_size = block_size
         self.distill_weight = distill_weight
@@ -603,6 +622,10 @@ class LLaDAOGuiD2FModel(nn.Module):
         """Compatibility alias for callers written before full-model training."""
 
         return self.model
+
+    @property
+    def teacher(self) -> nn.Module | None:
+        return self._teacher
 
     def forward(self, raw_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         batch = rebuild_and_corrupt_responses(
@@ -625,9 +648,16 @@ class LLaDAOGuiD2FModel(nn.Module):
             self.model, packed_sequence, batch, student_mask
         )
         student_log_probabilities = torch.log_softmax(student_logits.float(), dim=-1)
+        teacher_model = self.teacher
+        teacher_sequence = packed_sequence
+        if teacher_model is not None:
+            # Rebuild embeddings with the frozen teacher.  Reusing the
+            # student's evolving image/text embeddings would make the teacher
+            # drift even when its language weights are frozen.
+            teacher_sequence = prepare_understanding_sequence(teacher_model, batch)
         distill = teacher_distillation_loss(
-            self.model,
-            packed_sequence,
+            teacher_model if teacher_model is not None else self.model,
+            teacher_sequence,
             batch,
             student_log_probabilities,
             num_heads=base.num_heads,
