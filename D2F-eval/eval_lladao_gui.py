@@ -24,6 +24,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from lladao_d2f.inference import LLaDAOGuiD2FInference
 from lladao_d2f.modeling import add_lladao_repo
+from lladao_d2f.residual_grounding import (
+    ResidualGroundingContractError,
+    load_adapter_contract,
+    sha256_file,
+    validate_sha256,
+)
 
 
 DEFAULT_BENCHMARKS = "mind2web"
@@ -52,6 +58,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--adapter", type=Path)
+    parser.add_argument(
+        "--expected-checkpoint-sha256",
+        help="bind evaluation to one exact full Planner checkpoint",
+    )
+    parser.add_argument(
+        "--require-residual-adapter-contract",
+        action="store_true",
+        help=(
+            "require a release-eligible residual-grounder epoch bound to the "
+            "exact checkpoint SHA; intended for release benchmarks"
+        ),
+    )
     parser.add_argument("--runtime-model", type=Path)
     parser.add_argument("--benchmark-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -223,6 +241,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("D2F max-new-tokens must be divisible by block-size")
     if args.backend == "d2f_vllm" and args.runtime_model is None:
         parser.error("--runtime-model is required for d2f_vllm")
+    if args.require_residual_adapter_contract:
+        if args.adapter is None or args.expected_checkpoint_sha256 is None:
+            parser.error(
+                "--require-residual-adapter-contract requires --adapter and "
+                "--expected-checkpoint-sha256"
+            )
+        if args.backend == "d2f_vllm":
+            parser.error(
+                "a converted runtime cannot prove a separately loaded adapter; "
+                "use baseline/d2f for the residual release gate"
+            )
+        if args.limit is None or args.limit > 100:
+            parser.error("the residual release gate requires --limit in [1, 100]")
     if args.kv_cache_capacity is not None:
         if args.kv_cache_capacity <= 0:
             parser.error("--kv-cache-capacity must be positive")
@@ -804,7 +835,12 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
         "lladao_repo": str(args.lladao_repo.expanduser().resolve()),
         "model_path": str(args.model_path.expanduser().resolve()),
         "checkpoint": str(args.checkpoint.expanduser().resolve()),
+        "checkpoint_sha256": getattr(args, "checkpoint_sha256", None),
+        "expected_checkpoint_sha256": args.expected_checkpoint_sha256,
         "adapter": str(args.adapter.expanduser().resolve()) if args.adapter else None,
+        "residual_adapter_contract": getattr(
+            args, "residual_adapter_contract", None
+        ),
         "runtime_model": (
             str(args.runtime_model.expanduser().resolve())
             if args.runtime_model
@@ -878,6 +914,26 @@ def run_config(args: argparse.Namespace, benchmarks: list[str], device: str) -> 
 
 def main() -> None:
     args = parse_args()
+    args.checkpoint_sha256 = None
+    args.residual_adapter_contract = None
+    if args.expected_checkpoint_sha256 is not None:
+        expected_checkpoint_sha256 = validate_sha256(
+            args.expected_checkpoint_sha256,
+            name="--expected-checkpoint-sha256",
+        )
+        args.checkpoint_sha256 = sha256_file(args.checkpoint)
+        if args.checkpoint_sha256 != expected_checkpoint_sha256:
+            raise ResidualGroundingContractError(
+                "evaluation Planner checkpoint SHA-256 mismatch: "
+                f"expected={expected_checkpoint_sha256} "
+                f"actual={args.checkpoint_sha256}"
+            )
+    if args.require_residual_adapter_contract:
+        args.residual_adapter_contract = load_adapter_contract(
+            args.adapter,
+            expected_backbone_sha256=args.checkpoint_sha256,
+            require_complete=True,
+        )
     protocol = load_protocol(args.lladao_repo)
     parse_action, paired_sample_seed, iter_samples, load_completed, selected_benchmarks = protocol
     root = args.benchmark_root.expanduser().resolve()
@@ -892,6 +948,12 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    if args.require_residual_adapter_contract:
+        print(
+            "Residual release contract: loading Planner "
+            f"sha256={args.checkpoint_sha256} and its bound adapter epoch",
+            flush=True,
+        )
     print(f"Rank {args.rank}/{args.world_size}: loading {args.backend} on {device}", flush=True)
     if args.backend == "d2f_vllm":
         os.environ["D2F_VLLM_ATTENTION_BACKEND"] = args.attention_backend

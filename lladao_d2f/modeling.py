@@ -13,6 +13,7 @@ from torch import nn
 
 from .masking import create_full_document_mask, create_training_block_mask
 from .noise import rebuild_and_corrupt_responses
+from .residual_grounding import distillation_token_mask
 
 
 LLM_LORA_PATTERN = (
@@ -648,6 +649,11 @@ class LLaDAOGuiD2FModel(nn.Module):
             self.model, packed_sequence, batch, student_mask
         )
         student_log_probabilities = torch.log_softmax(student_logits.float(), dim=-1)
+        distill_mask = distillation_token_mask(
+            sample_lens=batch["sample_lens"],
+            target_indexes=batch["ce_loss_indexes"].long(),
+            sample_mask=batch.get("distill_sample_mask"),
+        )
         teacher_model = self.teacher
         teacher_sequence = packed_sequence
         if teacher_model is not None:
@@ -661,9 +667,15 @@ class LLaDAOGuiD2FModel(nn.Module):
             batch,
             student_log_probabilities,
             num_heads=base.num_heads,
-            distill_weight=self.distill_weight,
+            # A mobile-only microbatch uses hard labels and must not pay for a
+            # teacher forward. Mind2Web microbatches retain the original
+            # bidirectional-teacher D2F objective.
+            distill_weight=(
+                self.distill_weight if bool(distill_mask.any()) else 0.0
+            ),
             teacher_eval=self.teacher_eval,
         )
+        distill = distill * distill_mask.to(distill.dtype)
         hard_ce = torch.nn.functional.cross_entropy(
             student_logits.float(), batch["packed_label_ids"].long(), reduction="none"
         )
@@ -705,6 +717,7 @@ class LLaDAOGuiD2FModel(nn.Module):
             "d2f_random_masked_tokens": (weights > 0).sum(),
             "action_tokens": action_mask.sum(),
             "content_tokens": content_mask.sum(),
+            "distill_tokens": distill_mask.sum(),
             "action_class_weight": class_weight.float().reshape(()),
             "full_response_masked_count": full_response_count,
             "d2f_response_count": response_count,

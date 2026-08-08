@@ -756,6 +756,66 @@ parameterized by `NUM_PROCESSES`, `GRADIENT_ACCUMULATION_STEPS`, and
 `GPU_LAUNCHER`; the Slurm wrapper sets these to `8`, `2`, and
 `train_mlladao_gui_8gpu.sh` respectively.
 
+### Residual grounder on the final shared Planner
+
+The release workflow trains a fresh, zero-delta GUI-grounding adapter on the
+final full-parameter Planner. It never guesses a latest checkpoint: the input
+must be a `planner-result.json` from the fixed 100-sample gate with
+`status: passed`. The trainer then independently verifies the checkpoint's
+SHA-256, exact 8,459,716,512-parameter understanding-only schema, BF16 dtype,
+and absence of an embedded LoRA before attaching r32/alpha32/dropout0.1 LoRA
+to the 128 language-attention q/k/v/o projections. The Planner backbone stays
+frozen, so phone inference loads one backbone and switches this small adapter
+on only for grounding; it does not load a second model.
+
+The same launcher supports exactly two or eight visible GPUs and preserves a
+global batch of 16 (gradient accumulation 8 or 2 respectively). Every update
+is exactly 50% Mind2Web OCR and 50% mobile target-bearing data. Mind2Web uses
+D2F teacher distillation plus hard CE; mobile click/long-press examples use
+hard CE and skip the teacher forward entirely.
+
+Run the complete preparation, training, and fixed held-out benchmark with one
+command:
+
+```bash
+FINAL_PLANNER_RESULT=/home/ma-user/work/LLaDA-o/runs/<final-planner>/benchmark-fixed-100/planner/planner-result.json bash /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/scripts/run_mllm_lladao_residual_grounder.sh
+```
+
+The launcher prints the exact `tail -F` command before redirecting all stdout
+and stderr into one `residual-grounder.log`. After every epoch it evaluates
+exactly 100 independent Mind2Web-validation and 100 mobile-validation rows,
+then selects the adapter that maximizes the poorer domain's SSR. Only that one
+adapter is evaluated once on Mind2Web-test-100 and mobile-test-100. The
+launcher fails closed unless `MIND2WEB_VALIDATION_BENCH` names a prepared
+validation set disjoint from test; it never selects on Mind2Web test. KV
+compression is disabled. Each evaluator run records and rechecks the final
+Planner SHA and requires a release-eligible adapter contract bound to that
+SHA. The selection table and final test table are written to
+`benchmark/checkpoint-selection.md` and `benchmark/results.md`.
+
+Before the final Planner passes, a two/eight-GPU plumbing and save smoke can
+run for exactly one optimizer step against an explicitly pinned checkpoint:
+
+```bash
+RESIDUAL_SMOKE_ONLY=1 FINAL_PLANNER_CHECKPOINT=/absolute/model.safetensors FINAL_PLANNER_SHA256=<64-hex-sha256> bash /home/ma-user/work/LLaDA-o/src/Discrete-Diffusion-Forcing/scripts/run_mllm_lladao_residual_grounder.sh
+```
+
+Smoke mode still performs the strict checkpoint/schema audit and two-domain
+mix, but skips all benchmarks and marks its adapter contract as not release
+eligible. Its output must not be reported as a passed model result.
+
+By default the mobile converter reads prepared Planner JSONL from
+`$LLADAO_WORK_ROOT/data/unigui-openmobile-planner-v2-content-v4` and images
+from `$LLADA_AGENT_REPO/data/Uni-GUI-OpenMobile`. Set `PLANNER_DATA_ROOT` and
+`MOBILE_IMAGE_ROOT` when those immutable inputs live elsewhere; the converter
+does not modify LLaDA-Agent. Its held-out rows are selected deterministically
+by SHA-256 and capped at 100 per split.
+
+The historical 60-row result obtained by applying the old grounding LoRA to a
+Planner that already fused that LoRA (SSR/Joint 53.33%, average 0.915 s) is a
+**double-delta compatibility diagnostic only**. It is not a release baseline
+and cannot be used to judge the new residual adapter.
+
 ## 📚 Future Works
 
 - [x] Implement dLLM-suported vLLM (preliminary).

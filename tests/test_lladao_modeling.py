@@ -31,6 +31,7 @@ def test_training_wrapper_forwards_optional_prefix_segments(monkeypatch) -> None
         "sample_lens": [7],
         "d2f_response_spans": [[(5, 2)]],
         "d2f_prefix_segments": prefix_segments,
+        "ce_loss_indexes": torch.tensor([6]),
         "packed_label_ids": torch.tensor([1]),
         "ce_loss_weights": torch.ones(1),
         "action_ce_mask": torch.zeros(1, dtype=torch.bool),

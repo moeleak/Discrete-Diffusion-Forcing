@@ -1,0 +1,64 @@
+seed: 42
+
+distributed:
+  timeout_seconds: 1800
+
+paths:
+  lladao_repo: /home/ma-user/work/LLaDA-o/src/LLaDA-o
+  model_path: /home/ma-user/work/LLaDA-o/models/lladao-gui-mind2web-step750
+  # The launcher replaces both this path and the SHA with the exact final,
+  # passed Planner artifact. There is deliberately no runnable fallback.
+  checkpoint: FINAL_PLANNER_CHECKPOINT_REQUIRED
+  dataset_config: /home/ma-user/work/LLaDA-o/src/LLaDA-o/data/configs/gui_grounding_table1.yaml
+  output_dir: /home/ma-user/work/LLaDA-o/runs/residual-grounder
+
+model:
+  mask_id: 126336
+  block_size: 16
+  expected_checkpoint_sha256: FINAL_PLANNER_SHA256_REQUIRED
+  expected_active_parameters: 8459716512
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.1
+
+train:
+  epochs: 3
+  release_eligible: true
+  global_batch_size: 16
+  # Resolved to 8 for two GPUs and 2 for eight GPUs by the launcher.
+  gradient_accumulation_steps: 8
+  max_steps: 1
+  lr: 1.0e-5
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.05
+  warmup_ratio: 0.03
+  distill_weight: 1.0
+  hard_ce_weight: 1.0
+  max_grad_norm: 1.0
+  log_every: 10
+  save_every: 1
+  progress_refresh_seconds: 10
+  stall_trace_seconds: 180
+
+data:
+  # Alternation order is a training contract: each optimizer step contains an
+  # equal number of both domains. Mind2Web retains teacher distillation;
+  # mobile target-bearing examples use hard labels only.
+  domains:
+    mind2web:
+      path: /home/ma-user/work/LLaDA-o/data/train_ocr/mind2web
+      distill: true
+    mobile:
+      path: /home/ma-user/work/LLaDA-o/data/residual-grounding/mobile/train
+      distill: false
+  num_workers: 1
+  prefetch_factor: 2
+  timeout_seconds: 120
+  expected_num_tokens: 6144
+  max_num_tokens: 8192
+  max_num_tokens_per_sample: 8192
+  prefer_buffer_before: 6144
+  max_buffer_size: 50

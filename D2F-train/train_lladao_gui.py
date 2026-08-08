@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import hashlib
 import json
 import os
 import sys
@@ -34,6 +35,15 @@ from lladao_d2f.modeling import LLaDAOGuiD2FModel, add_lladao_repo, add_lora, lo
 from lladao_d2f.training import (
     advance_scheduler_for_optimizer_update,
     validate_scheduler_global_step,
+)
+from lladao_d2f.residual_grounding import (
+    adapter_contract,
+    audit_understanding_checkpoint,
+    audit_zero_initialized_lora,
+    domain_for_microstep,
+    load_adapter_contract,
+    validate_domain_schedule,
+    write_json_atomic,
 )
 
 
@@ -70,12 +80,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_loader(config, tokenizer, special_tokens, accelerator):
+def build_loader(config, tokenizer, special_tokens, accelerator, train_data: Path):
     add_lladao_repo(config.paths.lladao_repo)
-    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(
-        Path(config.paths.train_data).resolve()
-    )
+    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(train_data)
     from data.dataset_base import DataConfig, PackedDataset, collate_wrapper
+    from data.dataset_info import DATASET_INFO
+
+    # dataset_info captures LLADAO_GUI_GROUNDING_DIR at import time. Two-domain
+    # residual training constructs two independent PackedDatasets in one
+    # process, so bind the already-imported registry immediately before each
+    # dataset captures its path.
+    DATASET_INFO["vlm_parquet"]["gui_grounding_table1"]["data_dir"] = str(
+        train_data
+    )
 
     with Path(config.paths.dataset_config).open() as handle:
         grouped = yaml.safe_load(handle)
@@ -115,6 +132,31 @@ def build_loader(config, tokenizer, special_tokens, accelerator):
     return DataLoader(**loader_kwargs)
 
 
+def resolve_training_domains(config) -> tuple[tuple[str, Path, bool], ...]:
+    configured = getattr(config.data, "domains", None)
+    if configured is None:
+        return (
+            (
+                "mind2web",
+                Path(config.paths.train_data).expanduser().resolve(),
+                True,
+            ),
+        )
+    domains = tuple(
+        (
+            name,
+            Path(domain.path).expanduser().resolve(),
+            bool(domain.distill),
+        )
+        for name, domain in vars(configured).items()
+    )
+    validate_domain_schedule(
+        [(name, distill) for name, _, distill in domains],
+        int(config.train.gradient_accumulation_steps),
+    )
+    return domains
+
+
 def arm_stall_trace(timeout_seconds: float, trace_file) -> None:
     """Dump every Python thread if an optimizer step stops making progress."""
     faulthandler.cancel_dump_traceback_later()
@@ -125,7 +167,21 @@ def arm_stall_trace(timeout_seconds: float, trace_file) -> None:
     )
 
 
-def save_checkpoint(accelerator, model, optimizer, scheduler, output_root: Path, step: int):
+def save_checkpoint(
+    accelerator,
+    model,
+    optimizer,
+    scheduler,
+    output_root: Path,
+    step: int,
+    *,
+    max_steps: int,
+    backbone_audit: dict | None = None,
+    lora_audit: dict | None = None,
+    domain_counts: dict[str, int] | None = None,
+    config_sha256: str | None = None,
+    release_eligible: bool = False,
+):
     accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
         return
@@ -138,12 +194,39 @@ def save_checkpoint(accelerator, model, optimizer, scheduler, output_root: Path,
             "step": step,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            # Every rank follows the same deterministic domain alternation.
+            # Persist the rank-local counters so a resumed main process can
+            # continue them without multiplying an already-global value.
+            "domain_counts": dict(domain_counts or {}),
         },
         checkpoint / "training_state.pt",
     )
+    if backbone_audit is not None:
+        if lora_audit is None or config_sha256 is None:
+            raise RuntimeError("residual adapter checkpoint audit is incomplete")
+        contract = adapter_contract(
+            backbone_audit=backbone_audit,
+            lora_audit=lora_audit,
+            step=step,
+            max_steps=max_steps,
+            domain_counts={
+                name: int(count) * accelerator.num_processes
+                for name, count in (domain_counts or {}).items()
+            },
+            config_sha256=config_sha256,
+            release_eligible=release_eligible,
+        )
+        write_json_atomic(checkpoint / "adapter" / "training_contract.json", contract)
 
 
-def restore_checkpoint(peft_model, optimizer, scheduler, checkpoint: Path) -> int:
+def restore_checkpoint(
+    peft_model,
+    optimizer,
+    scheduler,
+    checkpoint: Path,
+    *,
+    expected_backbone_sha256: str | None = None,
+) -> tuple[int, dict[str, int]]:
     from peft import set_peft_model_state_dict
     from safetensors.torch import load_file
 
@@ -155,6 +238,11 @@ def restore_checkpoint(peft_model, optimizer, scheduler, checkpoint: Path) -> in
             f"resume checkpoint must contain {adapter_file.name} and {state_file.name}: "
             f"{checkpoint}"
         )
+    if expected_backbone_sha256 is not None:
+        load_adapter_contract(
+            checkpoint / "adapter",
+            expected_backbone_sha256=expected_backbone_sha256,
+        )
     adapter_state = load_file(str(adapter_file), device="cpu")
     incompatible = set_peft_model_state_dict(peft_model, adapter_state)
     if incompatible.unexpected_keys:
@@ -164,7 +252,10 @@ def restore_checkpoint(peft_model, optimizer, scheduler, checkpoint: Path) -> in
     training_state = torch.load(state_file, map_location="cpu", weights_only=False)
     optimizer.load_state_dict(training_state["optimizer"])
     scheduler.load_state_dict(training_state["scheduler"])
-    return int(training_state["step"])
+    return int(training_state["step"]), {
+        str(name): int(count)
+        for name, count in training_state.get("domain_counts", {}).items()
+    }
 
 
 def main() -> None:
@@ -179,10 +270,27 @@ def main() -> None:
             args.output_dir.expanduser().resolve()
         )
     config = as_namespace(raw_config)
-    train_data = Path(config.paths.train_data).expanduser().resolve()
-    if not train_data.is_dir() or next(train_data.rglob("*.parquet"), None) is None:
-        raise FileNotFoundError(f"training data contains no parquet shards: {train_data}")
-    os.environ["LLADAO_GUI_GROUNDING_DIR"] = str(train_data)
+    domains = resolve_training_domains(config)
+    for domain_name, train_data, _ in domains:
+        if (
+            not train_data.is_dir()
+            or next(train_data.rglob("*.parquet"), None) is None
+        ):
+            raise FileNotFoundError(
+                f"{domain_name} training data contains no parquet shards: "
+                f"{train_data}"
+            )
+    residual_training = len(domains) == 2
+    expected_checkpoint_sha256 = (
+        str(config.model.expected_checkpoint_sha256)
+        if residual_training
+        else None
+    )
+    expected_active_parameters = int(
+        getattr(config.model, "expected_active_parameters", 8_459_716_512)
+    )
+    config_bytes = yaml.safe_dump(raw_config, sort_keys=True).encode("utf-8")
+    config_sha256 = hashlib.sha256(config_bytes).hexdigest()
     max_steps = int(
         args.max_steps if args.max_steps is not None else config.train.max_steps
     )
@@ -202,6 +310,24 @@ def main() -> None:
         with (output_root / "resolved-config.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(raw_config, handle, sort_keys=False)
 
+    backbone_audit = None
+    if residual_training and process_index == 0:
+        backbone_audit = audit_understanding_checkpoint(
+            config.paths.checkpoint,
+            expected_sha256=expected_checkpoint_sha256,
+            expected_parameters=expected_active_parameters,
+        )
+        write_json_atomic(output_root / "backbone-audit.json", backbone_audit)
+
+    if residual_training and (
+        int(config.lora.rank),
+        int(config.lora.alpha),
+        float(config.lora.dropout),
+    ) != (32, 32, 0.1):
+        raise ValueError(
+            "residual grounding requires rank=32, alpha=32, dropout=0.1"
+        )
+
     base, tokenizer, special_tokens = load_base_model(
         config.paths.lladao_repo,
         config.paths.model_path,
@@ -213,6 +339,9 @@ def main() -> None:
         alpha=config.lora.alpha,
         dropout=config.lora.dropout,
     )
+    lora_audit = audit_zero_initialized_lora(peft_model)
+    if residual_training and process_index == 0:
+        write_json_atomic(output_root / "initial-lora-audit.json", lora_audit)
     model = LLaDAOGuiD2FModel(
         peft_model,
         mask_id=config.model.mask_id,
@@ -239,13 +368,15 @@ def main() -> None:
     warmup_steps = max(1, round(max_steps * float(config.train.warmup_ratio)))
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, max_steps)
     step = 0
+    domain_counts: dict[str, int] = {name: 0 for name, _, _ in domains}
     validate_scheduler_global_step(scheduler, step)
     if args.resume_from is not None:
-        step = restore_checkpoint(
+        step, domain_counts = restore_checkpoint(
             peft_model,
             optimizer,
             scheduler,
             args.resume_from,
+            expected_backbone_sha256=expected_checkpoint_sha256,
         )
         validate_scheduler_global_step(scheduler, step)
         if step >= max_steps:
@@ -272,7 +403,10 @@ def main() -> None:
         project_config=project_config,
         kwargs_handlers=[ddp, process_group],
     )
-    loader = build_loader(config, tokenizer, special_tokens, accelerator)
+    loaders = {
+        name: build_loader(config, tokenizer, special_tokens, accelerator, path)
+        for name, path, _ in domains
+    }
     # Keep the scheduler outside Accelerate. AcceleratedScheduler compensates
     # for non-split distributed batches by stepping once per process, but this
     # job defines max_steps in global optimizer updates and partitions its
@@ -280,7 +414,9 @@ def main() -> None:
     model, optimizer = accelerator.prepare(model, optimizer)
     model.train()
 
-    iterator = iter(loader)
+    iterators = {name: iter(loader) for name, loader in loaders.items()}
+    domain_schedule = tuple((name, distill) for name, _, distill in domains)
+    microstep = step * int(config.train.gradient_accumulation_steps)
     log_path = output_root / "train.jsonl"
     progress_handle = None
     if accelerator.is_main_process:
@@ -315,13 +451,25 @@ def main() -> None:
     arm_stall_trace(stall_trace_seconds, trace_handle)
     try:
         while step < stop_after_step:
+            domain_name, distill_enabled = domain_for_microstep(
+                microstep, domain_schedule
+            )
             try:
-                packed = next(iterator)
+                packed = next(iterators[domain_name])
             except StopIteration:
-                iterator = iter(loader)
-                packed = next(iterator)
+                iterators[domain_name] = iter(loaders[domain_name])
+                packed = next(iterators[domain_name])
             batch = packed.cuda(accelerator.device).to_dict()
             batch.pop("batch_data_indexes", None)
+            sample_count = len(batch["sample_lens"])
+            batch["distill_sample_mask"] = torch.full(
+                (sample_count,),
+                bool(distill_enabled),
+                dtype=torch.bool,
+                device=accelerator.device,
+            )
+            microstep += 1
+            domain_counts[domain_name] = domain_counts.get(domain_name, 0) + 1
             optimizer_updated = False
             with accelerator.accumulate(model):
                 metrics = model(batch)
@@ -377,12 +525,28 @@ def main() -> None:
                 progress.update(1)
                 if step == 1 or step % int(config.train.log_every) == 0:
                     record = {"step": step, "lr": current_lr, **reduced}
+                    record["domain_microbatches_per_rank"] = dict(domain_counts)
                     with log_path.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record, sort_keys=True) + "\n")
                     print(json.dumps(record, sort_keys=True), flush=True)
             arm_stall_trace(stall_trace_seconds, trace_handle)
             if step % int(config.train.save_every) == 0 or step == stop_after_step:
-                save_checkpoint(accelerator, model, optimizer, scheduler, output_root, step)
+                save_checkpoint(
+                    accelerator,
+                    model,
+                    optimizer,
+                    scheduler,
+                    output_root,
+                    step,
+                    max_steps=max_steps,
+                    backbone_audit=backbone_audit,
+                    lora_audit=lora_audit,
+                    domain_counts=domain_counts,
+                    config_sha256=config_sha256,
+                    release_eligible=bool(
+                        getattr(config.train, "release_eligible", False)
+                    ),
+                )
     finally:
         faulthandler.cancel_dump_traceback_later()
         progress.close()
