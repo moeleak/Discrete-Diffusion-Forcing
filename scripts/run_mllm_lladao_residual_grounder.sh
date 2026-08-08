@@ -5,10 +5,17 @@
 
 set -euo pipefail
 
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "${SOURCE}" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
+  SOURCE="$(readlink "${SOURCE}")"
+  [[ "${SOURCE}" = /* ]] || SOURCE="${SOURCE_DIR}/${SOURCE}"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
 ROOT="${LLADAO_WORK_ROOT:-/home/ma-user/work/LLaDA-o}"
-REPO="${D2F_REPO:-${ROOT}/src/Discrete-Diffusion-Forcing}"
+REPO="${D2F_REPO:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 LLADAO="${LLADAO_REPO:-${ROOT}/src/LLaDA-o}"
-LLADA_AGENT="${LLADA_AGENT_REPO:-${ROOT}/src/LLaDA-Agent}"
+LLADA_AGENT="${LLADA_AGENT_REPO:-$(dirname "${ROOT}")/LLaDA-Agent}"
 PYTHON="${PYTHON:-${ROOT}/env/bin/python}"
 ACCELERATE="${ACCELERATE:-${ROOT}/env/bin/accelerate}"
 TEMPLATE="${CONFIG_TEMPLATE:-${REPO}/D2F-train/config/lladao_gui_residual.yaml}"
