@@ -62,6 +62,8 @@ def test_residual_recipe_is_fixed_r32_and_exact_two_domain_objectives() -> None:
     source = TRAINER.read_text(encoding="utf-8")
     assert 'batch["distill_sample_mask"] = torch.full' in source
     assert "domain_for_microstep" in source
+    assert "OptimizerStepMetricAccumulator" in source
+    assert 'reduced[f"{domain_name}_{key}"]' in source
     assert "audit_understanding_checkpoint" in source
     assert "audit_zero_initialized_lora" in source
 

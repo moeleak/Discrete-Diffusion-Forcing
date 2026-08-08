@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from lladao_d2f.training import (
+    OptimizerStepMetricAccumulator,
     advance_scheduler_for_optimizer_update,
     validate_scheduler_global_step,
 )
@@ -61,3 +63,37 @@ def test_scheduler_state_must_match_global_step() -> None:
 
 def test_scheduler_state_accepts_matching_global_step() -> None:
     validate_scheduler_global_step(_Scheduler(last_epoch=1377), global_step=1377)
+
+
+def test_optimizer_step_metrics_include_both_residual_domains() -> None:
+    accumulator = OptimizerStepMetricAccumulator()
+    accumulator.add(
+        {
+            "loss": torch.tensor(4.0),
+            "distill_loss": torch.tensor(3.0),
+            "distill_tokens": torch.tensor(12),
+        },
+        domain="mind2web",
+    )
+    accumulator.add(
+        {
+            "loss": torch.tensor(2.0),
+            "distill_loss": torch.tensor(0.0),
+            "distill_tokens": torch.tensor(0),
+        },
+        domain="mobile",
+    )
+
+    overall, by_domain, counts = accumulator.take()
+
+    assert overall["loss"].item() == pytest.approx(3.0)
+    assert overall["distill_loss"].item() == pytest.approx(1.5)
+    assert overall["distill_tokens"].item() == pytest.approx(6.0)
+    assert by_domain["mind2web"]["distill_loss"].item() == pytest.approx(3.0)
+    assert by_domain["mind2web"]["distill_tokens"].item() == pytest.approx(12.0)
+    assert by_domain["mobile"]["distill_loss"].item() == 0.0
+    assert by_domain["mobile"]["distill_tokens"].item() == 0.0
+    assert counts == {"mind2web": 1, "mobile": 1}
+
+    with pytest.raises(RuntimeError, match="empty"):
+        accumulator.take()

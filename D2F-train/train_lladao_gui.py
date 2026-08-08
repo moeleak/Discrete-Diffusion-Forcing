@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from lladao_d2f.modeling import LLaDAOGuiD2FModel, add_lladao_repo, add_lora, load_base_model
 from lladao_d2f.training import (
+    OptimizerStepMetricAccumulator,
     advance_scheduler_for_optimizer_update,
     validate_scheduler_global_step,
 )
@@ -449,6 +450,7 @@ def main() -> None:
     )
     stall_trace_seconds = float(getattr(config.train, "stall_trace_seconds", 120))
     arm_stall_trace(stall_trace_seconds, trace_handle)
+    step_metric_accumulator = OptimizerStepMetricAccumulator()
     try:
         while step < stop_after_step:
             domain_name, distill_enabled = domain_for_microstep(
@@ -473,6 +475,7 @@ def main() -> None:
             optimizer_updated = False
             with accelerator.accumulate(model):
                 metrics = model(batch)
+                step_metric_accumulator.add(metrics, domain=domain_name)
                 accelerator.backward(metrics["loss"])
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(trainable, float(config.train.max_grad_norm))
@@ -484,14 +487,34 @@ def main() -> None:
                 )
                 optimizer.zero_grad(set_to_none=True)
             if not optimizer_updated:
+                if accelerator.sync_gradients:
+                    # A skipped update starts a fresh accumulation window.
+                    step_metric_accumulator.clear()
                 continue
             step += 1
             validate_scheduler_global_step(scheduler, step)
+            metrics, domain_metrics, domain_counts_in_step = (
+                step_metric_accumulator.take()
+            )
             gathered = {
                 key: accelerator.gather(value.detach().reshape(1)).float()
                 for key, value in metrics.items()
             }
             reduced = {key: value.mean().item() for key, value in gathered.items()}
+            domain_metric_names = (
+                "loss",
+                "distill_loss",
+                "hard_ce_loss",
+                "distill_tokens",
+                "masked_tokens",
+            )
+            for domain_name, values in domain_metrics.items():
+                for key in domain_metric_names:
+                    value = values[key]
+                    gathered_value = accelerator.gather(
+                        value.detach().reshape(1)
+                    ).float()
+                    reduced[f"{domain_name}_{key}"] = gathered_value.mean().item()
             count_metrics = (
                 "full_response_masked_count",
                 "d2f_response_count",
@@ -526,6 +549,9 @@ def main() -> None:
                 if step == 1 or step % int(config.train.log_every) == 0:
                     record = {"step": step, "lr": current_lr, **reduced}
                     record["domain_microbatches_per_rank"] = dict(domain_counts)
+                    record["domain_microbatches_per_optimizer_step"] = dict(
+                        domain_counts_in_step
+                    )
                     with log_path.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record, sort_keys=True) + "\n")
                     print(json.dumps(record, sort_keys=True), flush=True)
