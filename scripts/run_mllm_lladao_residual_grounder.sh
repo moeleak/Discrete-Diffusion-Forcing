@@ -22,6 +22,7 @@ ACCELERATE="${ACCELERATE:-${ROOT}/env/bin/accelerate}"
 TEMPLATE="${CONFIG_TEMPLATE:-${REPO}/D2F-train/config/lladao_gui_residual.yaml}"
 SMOKE_ONLY="${RESIDUAL_SMOKE_ONLY:-0}"
 PLANNER_RESULT="${FINAL_PLANNER_RESULT:-}"
+PLANNER_CHECKPOINT_OVERRIDE="${FINAL_PLANNER_CHECKPOINT:-}"
 MODEL_PATH="${LLADAO_MODEL_PATH:-${ROOT}/models/lladao-gui-mind2web-step750}"
 MIND2WEB_TRAIN="${MIND2WEB_TRAIN:-${ROOT}/data/train_ocr/mind2web}"
 MIND2WEB_BENCH="${MIND2WEB_BENCH:-${ROOT}/data/bench_ocr}"
@@ -49,7 +50,7 @@ die() {
 [[ ! -e "${OUTPUT_ROOT}" ]] || die "refusing to overwrite output: ${OUTPUT_ROOT}"
 
 if [[ "${SMOKE_ONLY}" == 1 ]]; then
-  PLANNER_CHECKPOINT="${FINAL_PLANNER_CHECKPOINT:?smoke requires FINAL_PLANNER_CHECKPOINT}"
+  PLANNER_CHECKPOINT="${PLANNER_CHECKPOINT_OVERRIDE:?smoke requires FINAL_PLANNER_CHECKPOINT}"
   PLANNER_SHA256="${FINAL_PLANNER_SHA256:?smoke requires FINAL_PLANNER_SHA256}"
   [[ -s "${PLANNER_CHECKPOINT}" ]] || die "smoke Planner checkpoint is missing"
   [[ "${PLANNER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid smoke Planner SHA-256"
@@ -58,13 +59,14 @@ elif [[ "${SMOKE_ONLY}" == 0 ]]; then
   [[ -f "${PLANNER_RESULT}" ]] || die "set FINAL_PLANNER_RESULT to the passed final planner-result.json"
   [[ -f "${MIND2WEB_BENCH}/manifest.json" ]] || die "Mind2Web OCR test benchmark is missing"
   mapfile -t planner_contract < <(
-    "${PYTHON}" - "${PLANNER_RESULT}" <<'PY'
+    "${PYTHON}" - "${PLANNER_RESULT}" "${PLANNER_CHECKPOINT_OVERRIDE}" <<'PY'
 import json
 import re
 import sys
 from pathlib import Path
 
 result_path = Path(sys.argv[1]).expanduser().resolve()
+checkpoint_override = sys.argv[2].strip()
 result = json.loads(result_path.read_text(encoding="utf-8"))
 benchmark = result.get("benchmark") or {}
 if int(benchmark.get("sample_count", 0)) != 100:
@@ -76,12 +78,17 @@ artifacts = result.get("artifacts") or {}
 checkpoint = Path(str(artifacts.get("checkpoint") or ""))
 if not checkpoint.is_absolute():
     checkpoint = (result_path.parent / checkpoint).resolve()
+if checkpoint_override:
+    checkpoint = Path(checkpoint_override).expanduser().resolve()
 digest = str(artifacts.get("checkpoint_sha256") or "")
 predictions = Path(str(artifacts.get("predictions") or ""))
 if not predictions.is_absolute():
     predictions = (result_path.parent / predictions).resolve()
 if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
-    raise SystemExit(f"final Planner checkpoint is missing: {checkpoint}")
+    raise SystemExit(
+        f"final Planner checkpoint is missing: {checkpoint}; set "
+        "FINAL_PLANNER_CHECKPOINT when the recorded artifact was relocated"
+    )
 if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
     raise SystemExit("final Planner result has no valid checkpoint SHA-256")
 if not predictions.is_file():

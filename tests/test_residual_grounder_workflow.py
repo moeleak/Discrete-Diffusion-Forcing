@@ -38,6 +38,8 @@ def test_launcher_is_one_log_complete_final_planner_and_2_or_8_gpu() -> None:
     assert RECEIPT_PATH.is_file()
     assert 'exec >>"${LOG_FILE}" 2>&1' in source
     assert "FINAL_PLANNER_RESULT" in source
+    assert "PLANNER_CHECKPOINT_OVERRIDE" in source
+    assert "when the recorded artifact was relocated" in source
     assert 'result.get("status")' not in source
     assert "complete fixed 100-sample run" in source
     assert "sample-ID SHA-256" in source
