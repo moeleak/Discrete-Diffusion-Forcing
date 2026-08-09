@@ -31,14 +31,17 @@ sys.modules[SUMMARY_SPEC.name] = SUMMARY
 SUMMARY_SPEC.loader.exec_module(SUMMARY)
 
 
-def test_launcher_is_one_log_strict_final_planner_and_2_or_8_gpu() -> None:
+def test_launcher_is_one_log_complete_final_planner_and_2_or_8_gpu() -> None:
     subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
     source = LAUNCHER.read_text(encoding="utf-8")
 
     assert RECEIPT_PATH.is_file()
     assert 'exec >>"${LOG_FILE}" 2>&1' in source
     assert "FINAL_PLANNER_RESULT" in source
-    assert 'result.get("status") != "passed"' in source
+    assert 'result.get("status")' not in source
+    assert "complete fixed 100-sample run" in source
+    assert "sample-ID SHA-256" in source
+    assert "predictions contain" in source
     assert "RESIDUAL_SMOKE_ONLY" in source
     assert "release residual training requires exactly 3 epochs" in source
     assert "FINAL_PLANNER_CHECKPOINT" in source

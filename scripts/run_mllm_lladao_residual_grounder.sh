@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepare, train, and benchmark one residual GUI-grounding LoRA on the exact
-# final Planner. The caller supplies a passed planner-result.json; there is no
+# final Planner. The caller supplies a complete fixed-100 planner-result.json;
+# benchmark quality thresholds do not block residual training, and there is no
 # "latest checkpoint" or old-base fallback.
 
 set -euo pipefail
@@ -65,22 +66,33 @@ from pathlib import Path
 
 result_path = Path(sys.argv[1]).expanduser().resolve()
 result = json.loads(result_path.read_text(encoding="utf-8"))
-if result.get("status") != "passed":
-    raise SystemExit(
-        "final Planner quality gate has not passed; refusing residual training"
-    )
 benchmark = result.get("benchmark") or {}
 if int(benchmark.get("sample_count", 0)) != 100:
-    raise SystemExit("final Planner result is not the fixed 100-sample gate")
+    raise SystemExit("final Planner result is not a complete fixed 100-sample run")
+sample_ids_sha = str(benchmark.get("sample_ids_sha256") or "")
+if re.fullmatch(r"[0-9a-f]{64}", sample_ids_sha) is None:
+    raise SystemExit("final Planner result has no valid sample-ID SHA-256")
 artifacts = result.get("artifacts") or {}
 checkpoint = Path(str(artifacts.get("checkpoint") or ""))
 if not checkpoint.is_absolute():
     checkpoint = (result_path.parent / checkpoint).resolve()
 digest = str(artifacts.get("checkpoint_sha256") or "")
+predictions = Path(str(artifacts.get("predictions") or ""))
+if not predictions.is_absolute():
+    predictions = (result_path.parent / predictions).resolve()
 if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
     raise SystemExit(f"final Planner checkpoint is missing: {checkpoint}")
 if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
     raise SystemExit("final Planner result has no valid checkpoint SHA-256")
+if not predictions.is_file():
+    raise SystemExit(f"final Planner predictions are missing: {predictions}")
+prediction_count = sum(
+    1 for line in predictions.read_text(encoding="utf-8").splitlines() if line.strip()
+)
+if prediction_count != 100:
+    raise SystemExit(
+        f"final Planner predictions contain {prediction_count} rows, expected 100"
+    )
 print(checkpoint)
 print(digest)
 PY
