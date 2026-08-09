@@ -53,6 +53,7 @@ if [[ "${SMOKE_ONLY}" == 1 ]]; then
   [[ -s "${PLANNER_CHECKPOINT}" ]] || die "smoke Planner checkpoint is missing"
   [[ "${PLANNER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid smoke Planner SHA-256"
 elif [[ "${SMOKE_ONLY}" == 0 ]]; then
+  [[ "${EPOCHS}" == 3 ]] || die "release residual training requires exactly 3 epochs"
   [[ -f "${PLANNER_RESULT}" ]] || die "set FINAL_PLANNER_RESULT to the passed final planner-result.json"
   [[ -f "${MIND2WEB_BENCH}/manifest.json" ]] || die "Mind2Web OCR test benchmark is missing"
   mapfile -t planner_contract < <(
@@ -377,5 +378,11 @@ PY
 "${PYTHON}" "${REPO}/D2F-eval/summarize_residual_grounder.py" \
   --index "${INDEX}" \
   --output "${OUTPUT_ROOT}/benchmark/results.md"
+RELEASE_RECEIPT="${OUTPUT_ROOT}/benchmark/release-receipt.json"
+"${PYTHON}" "${REPO}/D2F-eval/build_residual_release_receipt.py" \
+  --index "${INDEX}" \
+  --selection "${SELECTION}" \
+  --output "${RELEASE_RECEIPT}"
 cat "${OUTPUT_ROOT}/benchmark/results.md"
+echo "[$(timestamp)] mobile release receipt=${RELEASE_RECEIPT}"
 echo "[$(timestamp)] residual grounding training and fixed held-out benchmarks completed"

@@ -189,7 +189,15 @@ def save_checkpoint(
     checkpoint = output_root / f"step-{step:07d}"
     checkpoint.mkdir(parents=True, exist_ok=True)
     unwrapped = accelerator.unwrap_model(model)
-    unwrapped.peft_model.save_pretrained(checkpoint / "adapter", safe_serialization=True)
+    unwrapped.peft_model.save_pretrained(
+        checkpoint / "adapter",
+        safe_serialization=True,
+        # The shared full Planner checkpoint owns every embedding tensor. This
+        # residual artifact contains attention LoRA weights only, so make the
+        # PEFT contract explicit instead of asking it to guess from a model
+        # directory and emitting a misleading vocabulary warning.
+        save_embedding_layers=False,
+    )
     torch.save(
         {
             "step": step,
@@ -581,6 +589,7 @@ def main() -> None:
             progress_handle.close()
 
     accelerator.wait_for_everyone()
+    accelerator.end_training()
 
 
 if __name__ == "__main__":

@@ -20,16 +20,27 @@ SELECTOR = importlib.util.module_from_spec(SELECTOR_SPEC)
 assert SELECTOR_SPEC.loader is not None
 sys.modules[SELECTOR_SPEC.name] = SELECTOR
 SELECTOR_SPEC.loader.exec_module(SELECTOR)
+RECEIPT_PATH = ROOT / "D2F-eval/build_residual_release_receipt.py"
+SUMMARY_PATH = ROOT / "D2F-eval/summarize_residual_grounder.py"
+SUMMARY_SPEC = importlib.util.spec_from_file_location(
+    "summarize_residual_grounder", SUMMARY_PATH
+)
+SUMMARY = importlib.util.module_from_spec(SUMMARY_SPEC)
+assert SUMMARY_SPEC.loader is not None
+sys.modules[SUMMARY_SPEC.name] = SUMMARY
+SUMMARY_SPEC.loader.exec_module(SUMMARY)
 
 
 def test_launcher_is_one_log_strict_final_planner_and_2_or_8_gpu() -> None:
     subprocess.run(["bash", "-n", str(LAUNCHER)], check=True)
     source = LAUNCHER.read_text(encoding="utf-8")
 
+    assert RECEIPT_PATH.is_file()
     assert 'exec >>"${LOG_FILE}" 2>&1' in source
     assert "FINAL_PLANNER_RESULT" in source
     assert 'result.get("status") != "passed"' in source
     assert "RESIDUAL_SMOKE_ONLY" in source
+    assert "release residual training requires exactly 3 epochs" in source
     assert "FINAL_PLANNER_CHECKPOINT" in source
     assert "FINAL_PLANNER_SHA256" in source
     assert "MAX_STEPS=1" in source
@@ -42,6 +53,8 @@ def test_launcher_is_one_log_strict_final_planner_and_2_or_8_gpu() -> None:
     assert "--require-residual-adapter-contract" in source
     assert "--no-kv-cache-compression" in source
     assert "select_residual_grounder.py" in source
+    assert "build_residual_release_receipt.py" in source
+    assert "release-receipt.json" in source
     assert "Mind2Web validation-100 overlaps Mind2Web test-100" in source
 
 
@@ -64,6 +77,8 @@ def test_residual_recipe_is_fixed_r32_and_exact_two_domain_objectives() -> None:
     assert "domain_for_microstep" in source
     assert "OptimizerStepMetricAccumulator" in source
     assert 'reduced[f"{domain_name}_{key}"]' in source
+    assert "save_embedding_layers=False" in source
+    assert "accelerator.end_training()" in source
     assert "audit_understanding_checkpoint" in source
     assert "audit_zero_initialized_lora" in source
 
@@ -106,3 +121,60 @@ def test_checkpoint_selection_maximizes_worst_validation_domain(
 
     assert result["selected"]["epoch"] == 2
     assert result["test_data_used_for_selection"] is False
+
+
+def test_release_summary_rejects_partial_test_run(tmp_path: Path) -> None:
+    backbone = "a" * 64
+    adapter_contract = {"backbone": {"sha256": backbone}}
+    config = tmp_path / "run-config.json"
+    scores = tmp_path / "scores.json"
+    index = tmp_path / "index.json"
+    config.write_text(
+        json.dumps(
+            {
+                "checkpoint_sha256": backbone,
+                "residual_adapter_contract": adapter_contract,
+            }
+        ),
+        encoding="utf-8",
+    )
+    scores.write_text(
+        json.dumps(
+            {
+                "benchmarks": {
+                    "mind2web": {
+                        "num_samples": 99,
+                        "ssr_point_only": 0.8,
+                        "joint_step_success": 0.75,
+                        "action_f1_macro_present": 1.0,
+                        "parse_rate": 1.0,
+                        "latency_seconds": {"mean": 1.0},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    index.write_text(
+        json.dumps(
+            {
+                "backbone_sha256": backbone,
+                "runs": [
+                    {
+                        "label": "mind2web-test",
+                        "benchmark": "mind2web",
+                        "run_config": str(config),
+                        "scores": str(scores),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        SUMMARY.summarize(index)
+    except ValueError as error:
+        assert "exactly 100" in str(error)
+    else:
+        raise AssertionError("partial release benchmark was accepted")

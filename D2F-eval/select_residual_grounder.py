@@ -112,7 +112,9 @@ def markdown(result: dict) -> str:
     lines.extend(
         [
             "",
-            "Selection maximizes the poorer domain's validation SSR. Test splits were not read.",
+            "Selection maximizes the poorer domain's validation SSR. Test labels "
+            "and metrics were not used for selection; test IDs may be audited "
+            "for split overlap.",
             "",
         ]
     )

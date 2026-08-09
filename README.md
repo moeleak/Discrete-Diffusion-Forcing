@@ -792,6 +792,12 @@ compression is disabled. Each evaluator run records and rechecks the final
 Planner SHA and requires a release-eligible adapter contract bound to that
 SHA. The selection table and final test table are written to
 `benchmark/checkpoint-selection.md` and `benchmark/results.md`.
+Only after both test runs contain exactly 100 scored samples, the launcher
+writes `benchmark/release-receipt.json`. That receipt hashes the selected
+adapter weights and training contract, the validation selection, and both
+test run-config/result files. Mobile conversion must consume this receipt;
+an epoch training contract by itself is not proof that the adapter was
+selected or tested.
 
 Before the final Planner passes, a two/eight-GPU plumbing and save smoke can
 run for exactly one optimizer step against an explicitly pinned checkpoint:

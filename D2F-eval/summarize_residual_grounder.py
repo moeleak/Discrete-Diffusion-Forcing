@@ -35,8 +35,10 @@ def summarize(index_path: Path) -> str:
         if (contract.get("backbone") or {}).get("sha256") != expected_sha:
             raise ValueError(f"{benchmark} did not load the bound residual adapter")
         count = int(metrics["num_samples"])
-        if not 1 <= count <= 100:
-            raise ValueError(f"{benchmark} has invalid release sample count {count}")
+        if count != 100:
+            raise ValueError(
+                f"{benchmark} release evidence requires exactly 100 samples, found {count}"
+            )
         rows.append(
             "| {label} | {count} | {ssr} | {joint} | {f1} | {parse} | {latency:.3f} |".format(
                 label=run["label"],
