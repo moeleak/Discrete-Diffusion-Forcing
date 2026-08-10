@@ -45,6 +45,11 @@ def test_launcher_is_one_log_complete_final_planner_and_2_or_8_gpu() -> None:
     assert "sample-ID SHA-256" in source
     assert "predictions contain" in source
     assert "RESIDUAL_SMOKE_ONLY" in source
+    assert "RESIDUAL_BENCHMARK_ONLY" in source
+    assert "benchmark-only resolved config audit passed" in source
+    assert "BENCHMARK ONLY: reusing the three completed epoch adapters" in source
+    assert "sample image is missing" in source
+    assert "archived incomplete benchmark output" in source
     assert "release residual training requires exactly 3 epochs" in source
     assert "FINAL_PLANNER_CHECKPOINT" in source
     assert "FINAL_PLANNER_SHA256" in source

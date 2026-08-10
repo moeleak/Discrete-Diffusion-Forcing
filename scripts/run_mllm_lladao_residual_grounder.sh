@@ -21,6 +21,7 @@ PYTHON="${PYTHON:-${ROOT}/env/bin/python}"
 ACCELERATE="${ACCELERATE:-${ROOT}/env/bin/accelerate}"
 TEMPLATE="${CONFIG_TEMPLATE:-${REPO}/D2F-train/config/lladao_gui_residual.yaml}"
 SMOKE_ONLY="${RESIDUAL_SMOKE_ONLY:-0}"
+BENCHMARK_ONLY="${RESIDUAL_BENCHMARK_ONLY:-0}"
 PLANNER_RESULT="${FINAL_PLANNER_RESULT:-}"
 PLANNER_CHECKPOINT_OVERRIDE="${FINAL_PLANNER_CHECKPOINT:-}"
 MODEL_PATH="${LLADAO_MODEL_PATH:-${ROOT}/models/lladao-gui-mind2web-step750}"
@@ -47,7 +48,14 @@ die() {
 [[ -f "${TEMPLATE}" ]] || die "config template is missing: ${TEMPLATE}"
 [[ -d "${MODEL_PATH}" ]] || die "model/tokenizer directory is missing: ${MODEL_PATH}"
 [[ -d "${MIND2WEB_TRAIN}" ]] || die "Mind2Web training data is missing: ${MIND2WEB_TRAIN}"
-[[ ! -e "${OUTPUT_ROOT}" ]] || die "refusing to overwrite output: ${OUTPUT_ROOT}"
+case "${BENCHMARK_ONLY}" in
+  0) [[ ! -e "${OUTPUT_ROOT}" ]] || die "refusing to overwrite output: ${OUTPUT_ROOT}" ;;
+  1)
+    [[ "${SMOKE_ONLY}" == 0 ]] || die "benchmark-only recovery is incompatible with smoke mode"
+    [[ -d "${OUTPUT_ROOT}" ]] || die "benchmark-only run directory is missing: ${OUTPUT_ROOT}"
+    ;;
+  *) die "RESIDUAL_BENCHMARK_ONLY must be 0 or 1" ;;
+esac
 
 if [[ "${SMOKE_ONLY}" == 1 ]]; then
   PLANNER_CHECKPOINT="${PLANNER_CHECKPOINT_OVERRIDE:?smoke requires FINAL_PLANNER_CHECKPOINT}"
@@ -167,13 +175,30 @@ def selected_ids(root: Path, benchmark: str) -> list[str]:
         raise SystemExit(f"benchmark {benchmark!r} is missing below {root}")
     path = root / details["path"]
     rows = [
-        json.loads(line)["sample_id"]
+        json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     if len(rows) < 100:
         raise SystemExit(f"benchmark {benchmark!r} has {len(rows)} rows, needs 100")
-    return rows[:100]
+    selected = rows[:100]
+    for row in selected:
+        image_value = row.get("image")
+        if not isinstance(image_value, str) or not image_value:
+            raise SystemExit(
+                f"benchmark {benchmark!r} sample {row.get('sample_id')!r} has no image"
+            )
+        relative = Path(image_value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit(
+                f"benchmark {benchmark!r} has unsafe image path: {image_value}"
+            )
+        image = root / relative
+        if not image.is_file():
+            raise SystemExit(
+                f"benchmark {benchmark!r} sample image is missing: {image}"
+            )
+    return [str(row["sample_id"]) for row in selected]
 
 validation_root, validation_name = Path(sys.argv[1]), sys.argv[2]
 test_root, test_name = Path(sys.argv[3]), sys.argv[4]
@@ -239,11 +264,48 @@ if [[ "${SMOKE_ONLY}" == 1 ]]; then
 fi
 CONFIG="${OUTPUT_ROOT}/resolved-config.yaml"
 
-"${PYTHON}" - \
-  "${TEMPLATE}" "${CONFIG}" "${ROOT}" "${LLADAO}" "${OUTPUT_ROOT}" \
-  "${MODEL_PATH}" "${PLANNER_CHECKPOINT}" "${PLANNER_SHA256}" "${MIND2WEB_TRAIN}" \
-  "${MOBILE_DATA}/train" "${GRADIENT_ACCUMULATION_STEPS}" \
-  "${MAX_STEPS}" "${SAVE_EVERY}" "${EPOCHS}" "${SMOKE_ONLY}" <<'PY'
+if [[ "${BENCHMARK_ONLY}" == 1 ]]; then
+  [[ -s "${CONFIG}" ]] || die "benchmark-only resolved config is missing: ${CONFIG}"
+  "${PYTHON}" - \
+    "${CONFIG}" "${PLANNER_CHECKPOINT}" "${PLANNER_SHA256}" \
+    "${MAX_STEPS}" "${SAVE_EVERY}" "${EPOCHS}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config_path, checkpoint, checkpoint_sha, max_steps, save_every, epochs = sys.argv[1:]
+config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+paths = config.get("paths") or {}
+model = config.get("model") or {}
+train = config.get("train") or {}
+expected = {
+    "checkpoint": str(Path(checkpoint).resolve()),
+    "checkpoint_sha256": checkpoint_sha,
+    "max_steps": int(max_steps),
+    "save_every": int(save_every),
+    "epochs": int(epochs),
+}
+actual = {
+    "checkpoint": str(Path(paths.get("checkpoint", "")).resolve()),
+    "checkpoint_sha256": model.get("expected_checkpoint_sha256"),
+    "max_steps": int(train.get("max_steps", -1)),
+    "save_every": int(train.get("save_every", -1)),
+    "epochs": int(train.get("epochs", -1)),
+}
+if actual != expected:
+    raise SystemExit(
+        f"benchmark-only resolved config does not match this release run: "
+        f"expected={expected!r} actual={actual!r}"
+    )
+print("benchmark-only resolved config audit passed")
+PY
+else
+  "${PYTHON}" - \
+    "${TEMPLATE}" "${CONFIG}" "${ROOT}" "${LLADAO}" "${OUTPUT_ROOT}" \
+    "${MODEL_PATH}" "${PLANNER_CHECKPOINT}" "${PLANNER_SHA256}" "${MIND2WEB_TRAIN}" \
+    "${MOBILE_DATA}/train" "${GRADIENT_ACCUMULATION_STEPS}" \
+    "${MAX_STEPS}" "${SAVE_EVERY}" "${EPOCHS}" "${SMOKE_ONLY}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -273,6 +335,7 @@ config["train"].update(
 )
 Path(output).write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 PY
+fi
 
 echo "[$(timestamp)] GPUs=${NUM_PROCESSES} global_batch=16 accumulation=${GRADIENT_ACCUMULATION_STEPS}"
 echo "[$(timestamp)] rows mind2web=${MIND2WEB_ROWS} mobile=${MOBILE_ROWS} epochs=${EPOCHS} steps=${MAX_STEPS}"
@@ -282,17 +345,21 @@ if [[ -n "${RESUME_FROM:-}" ]]; then
   resume_args=(--resume-from "${RESUME_FROM}")
 fi
 
-echo "[$(timestamp)] starting residual grounding training"
-"${ACCELERATE}" launch \
-  --multi_gpu \
-  --num_processes "${NUM_PROCESSES}" \
-  --num_machines 1 \
-  --mixed_precision bf16 \
-  --dynamo_backend no \
-  "${REPO}/D2F-train/train_lladao_gui.py" \
-  --config "${CONFIG}" \
-  --max-steps "${MAX_STEPS}" \
-  "${resume_args[@]}"
+if [[ "${BENCHMARK_ONLY}" == 1 ]]; then
+  echo "[$(timestamp)] BENCHMARK ONLY: reusing the three completed epoch adapters"
+else
+  echo "[$(timestamp)] starting residual grounding training"
+  "${ACCELERATE}" launch \
+    --multi_gpu \
+    --num_processes "${NUM_PROCESSES}" \
+    --num_machines 1 \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    "${REPO}/D2F-train/train_lladao_gui.py" \
+    --config "${CONFIG}" \
+    --max-steps "${MAX_STEPS}" \
+    "${resume_args[@]}"
+fi
 
 FINAL_ADAPTER="${OUTPUT_ROOT}/step-$(printf '%07d' "${MAX_STEPS}")/adapter"
 [[ -s "${FINAL_ADAPTER}/adapter_model.safetensors" ]] || die "final adapter is missing"
@@ -309,6 +376,28 @@ run_benchmark() {
   local benchmark="$3"
   local adapter="$4"
   local output="${OUTPUT_ROOT}/benchmark/${label}"
+  if [[ -e "${output}" ]]; then
+    if [[ -s "${output}/scores/results.json" ]] && \
+      "${PYTHON}" - "${output}/scores/results.json" "${benchmark}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+scores = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+result = (scores.get("benchmarks") or {}).get(sys.argv[2])
+if not isinstance(result, dict) or int(result.get("num_samples", -1)) != 100:
+    raise SystemExit(1)
+PY
+    then
+      echo "[$(timestamp)] benchmark ${label}: already complete (100 samples)"
+      return
+    fi
+    [[ "${BENCHMARK_ONLY}" == 1 ]] || die "benchmark output already exists: ${output}"
+    local archive="${output}.incomplete-$(date '+%Y%m%d-%H%M%S')"
+    [[ ! -e "${archive}" ]] || die "benchmark archive already exists: ${archive}"
+    mv "${output}" "${archive}"
+    echo "[$(timestamp)] archived incomplete benchmark output=${archive}"
+  fi
   mkdir -p "${output}"
   echo "[$(timestamp)] benchmark ${label}: ${benchmark} (max 100)"
   "${PYTHON}" "${REPO}/D2F-eval/eval_lladao_gui.py" \
