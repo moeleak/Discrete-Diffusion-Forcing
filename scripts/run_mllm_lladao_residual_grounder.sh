@@ -223,6 +223,16 @@ case "${NUM_PROCESSES}" in
   8) GRADIENT_ACCUMULATION_STEPS=2 ;;
   *) die "expected exactly 2 or 8 visible GPUs, found ${NUM_PROCESSES}" ;;
 esac
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=',' read -r -a BENCHMARK_GPU_TOKENS <<<"${CUDA_VISIBLE_DEVICES}"
+else
+  BENCHMARK_GPU_TOKENS=()
+  for ((gpu = 0; gpu < NUM_PROCESSES; gpu++)); do
+    BENCHMARK_GPU_TOKENS+=("${gpu}")
+  done
+fi
+(( ${#BENCHMARK_GPU_TOKENS[@]} == NUM_PROCESSES )) || die \
+  "CUDA_VISIBLE_DEVICES does not match the ${NUM_PROCESSES} visible GPUs"
 
 mapfile -t training_budget < <(
   "${PYTHON}" - "${MIND2WEB_TRAIN}" "${MOBILE_DATA}/train" "${EPOCHS}" <<'PY'
@@ -375,6 +385,7 @@ run_benchmark() {
   local benchmark_root="$2"
   local benchmark="$3"
   local adapter="$4"
+  local device="$5"
   local output="${OUTPUT_ROOT}/benchmark/${label}"
   if [[ -e "${output}" ]]; then
     if [[ -s "${output}/scores/results.json" ]] && \
@@ -399,7 +410,8 @@ PY
     echo "[$(timestamp)] archived incomplete benchmark output=${archive}"
   fi
   mkdir -p "${output}"
-  echo "[$(timestamp)] benchmark ${label}: ${benchmark} (max 100)"
+  echo "[$(timestamp)] benchmark ${label}: ${benchmark} (max 100, GPU ${device})"
+  CUDA_VISIBLE_DEVICES="${device}" \
   "${PYTHON}" "${REPO}/D2F-eval/eval_lladao_gui.py" \
     --backend d2f \
     --lladao-repo "${LLADAO}" \
@@ -423,15 +435,37 @@ PY
     --limit 100
 }
 
+run_benchmark_pair() {
+  local left_label="$1"
+  local left_root="$2"
+  local left_benchmark="$3"
+  local right_label="$4"
+  local right_root="$5"
+  local right_benchmark="$6"
+  local adapter="$7"
+  local status=0
+
+  run_benchmark \
+    "${left_label}" "${left_root}" "${left_benchmark}" "${adapter}" \
+    "${BENCHMARK_GPU_TOKENS[0]}" &
+  local left_pid=$!
+  run_benchmark \
+    "${right_label}" "${right_root}" "${right_benchmark}" "${adapter}" \
+    "${BENCHMARK_GPU_TOKENS[1]}" &
+  local right_pid=$!
+  wait "${left_pid}" || status=$?
+  wait "${right_pid}" || status=$?
+  (( status == 0 )) || return "${status}"
+}
+
 echo "[$(timestamp)] selecting one epoch on two independent validation-100 domains"
 for ((epoch = 1; epoch <= EPOCHS; epoch++)); do
   step=$((epoch * SAVE_EVERY))
   adapter="${OUTPUT_ROOT}/step-$(printf '%07d' "${step}")/adapter"
   [[ -s "${adapter}/adapter_model.safetensors" ]] || die "epoch ${epoch} adapter is missing"
-  run_benchmark \
+  run_benchmark_pair \
     "validation/epoch-$(printf '%02d' "${epoch}")/mind2web" \
-    "${MIND2WEB_VALIDATION_BENCH}" "${MIND2WEB_VALIDATION_NAME}" "${adapter}"
-  run_benchmark \
+    "${MIND2WEB_VALIDATION_BENCH}" "${MIND2WEB_VALIDATION_NAME}" \
     "validation/epoch-$(printf '%02d' "${epoch}")/mobile" \
     "${MOBILE_DATA}/benchmark" mobile_validation "${adapter}"
 done
@@ -448,8 +482,9 @@ echo "[$(timestamp)] selected adapter=${SELECTED_ADAPTER}"
 
 # Test data is touched only after validation has selected one checkpoint, and
 # each test split is evaluated exactly once.
-run_benchmark mind2web-test "${MIND2WEB_BENCH}" "${MIND2WEB_TEST_NAME}" "${SELECTED_ADAPTER}"
-run_benchmark mobile-test "${MOBILE_DATA}/benchmark" mobile_test "${SELECTED_ADAPTER}"
+run_benchmark_pair \
+  mind2web-test "${MIND2WEB_BENCH}" "${MIND2WEB_TEST_NAME}" \
+  mobile-test "${MOBILE_DATA}/benchmark" mobile_test "${SELECTED_ADAPTER}"
 
 INDEX="${OUTPUT_ROOT}/benchmark/index.json"
 "${PYTHON}" - "${INDEX}" "${OUTPUT_ROOT}" "${PLANNER_SHA256}" "${MIND2WEB_TEST_NAME}" <<'PY'
