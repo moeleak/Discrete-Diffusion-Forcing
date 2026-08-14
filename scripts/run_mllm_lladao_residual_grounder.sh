@@ -33,6 +33,7 @@ MIND2WEB_VALIDATION_NAME="${MIND2WEB_VALIDATION_NAME:-mind2web_validation}"
 PLANNER_DATA="${PLANNER_DATA_ROOT:-${ROOT}/data/unigui-openmobile-planner-v2-content-v4}"
 MOBILE_IMAGES="${MOBILE_IMAGE_ROOT:-${LLADA_AGENT}/data/Uni-GUI-OpenMobile}"
 MOBILE_DATA="${MOBILE_GROUNDING_ROOT:-${ROOT}/data/residual-grounding/mobile}"
+CONTEXT_BENCHMARK_ROOT="${MOBILE_CONTEXT_BENCHMARK_ROOT:-}"
 RUN_ID="${RUN_ID:-$(date '+%Y%m%d-%H%M%S')}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT}/runs/residual-grounder-${RUN_ID}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_ROOT}/residual-grounder.log}"
@@ -159,6 +160,10 @@ if [[ ! -f "${MOBILE_DATA}/manifest.json" ]]; then
 fi
 [[ -f "${MOBILE_DATA}/manifest.json" ]] || die "mobile grounding manifest is missing"
 [[ -f "${MOBILE_DATA}/benchmark/manifest.json" ]] || die "mobile benchmark is missing"
+if [[ -n "${CONTEXT_BENCHMARK_ROOT}" ]]; then
+  [[ -f "${CONTEXT_BENCHMARK_ROOT}/manifest.json" ]] || die \
+    "context grounding benchmark manifest is missing: ${CONTEXT_BENCHMARK_ROOT}"
+fi
 if [[ "${SMOKE_ONLY}" == 0 ]]; then
   "${PYTHON}" - \
     "${MIND2WEB_VALIDATION_BENCH}" "${MIND2WEB_VALIDATION_NAME}" \
@@ -386,17 +391,19 @@ run_benchmark() {
   local benchmark="$3"
   local adapter="$4"
   local device="$5"
+  local expected_samples="${6:-100}"
   local output="${OUTPUT_ROOT}/benchmark/${label}"
   if [[ -e "${output}" ]]; then
     if [[ -s "${output}/scores/results.json" ]] && \
-      "${PYTHON}" - "${output}/scores/results.json" "${benchmark}" <<'PY'
+      "${PYTHON}" - "${output}/scores/results.json" "${benchmark}" "${expected_samples}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 scores = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 result = (scores.get("benchmarks") or {}).get(sys.argv[2])
-if not isinstance(result, dict) or int(result.get("num_samples", -1)) != 100:
+expected = int(sys.argv[3])
+if not isinstance(result, dict) or int(result.get("num_samples", -1)) != expected:
     raise SystemExit(1)
 PY
     then
@@ -410,7 +417,7 @@ PY
     echo "[$(timestamp)] archived incomplete benchmark output=${archive}"
   fi
   mkdir -p "${output}"
-  echo "[$(timestamp)] benchmark ${label}: ${benchmark} (max 100, GPU ${device})"
+  echo "[$(timestamp)] benchmark ${label}: ${benchmark} (${expected_samples} samples, GPU ${device})"
   CUDA_VISIBLE_DEVICES="${device}" \
   "${PYTHON}" "${REPO}/D2F-eval/eval_lladao_gui.py" \
     --backend d2f \
@@ -423,7 +430,7 @@ PY
     --benchmark-root "${benchmark_root}" \
     --output-dir "${output}" \
     --benchmarks "${benchmark}" \
-    --limit 100 \
+    --limit "${expected_samples}" \
     --seed 42 \
     --no-kv-cache-compression \
     --no-resume
@@ -432,7 +439,7 @@ PY
     --predictions-dir "${output}" \
     --output-dir "${output}/scores" \
     --benchmarks "${benchmark}" \
-    --limit 100
+    --limit "${expected_samples}"
 }
 
 run_benchmark_pair() {
@@ -486,6 +493,64 @@ run_benchmark_pair \
   mind2web-test "${MIND2WEB_BENCH}" "${MIND2WEB_TEST_NAME}" \
   mobile-test "${MOBILE_DATA}/benchmark" mobile_test "${SELECTED_ADAPTER}"
 
+CONTEXT_AUDIT=""
+if [[ -n "${CONTEXT_BENCHMARK_ROOT}" ]]; then
+  mapfile -t context_contract < <(
+    "${PYTHON}" - "${CONTEXT_BENCHMARK_ROOT}/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+benchmarks = manifest.get("benchmarks") or {}
+clean_name = "mobile_test_context_clean"
+hard_name = "mobile_test_context_hard_hint"
+clean = benchmarks.get(clean_name) or {}
+hard = benchmarks.get(hard_name) or {}
+clean_count = int(clean.get("rows", -1))
+hard_count = int(hard.get("rows", -1))
+if not 0 < clean_count <= 100 or clean_count != hard_count:
+    raise SystemExit("context test pair must contain the same 1..100 samples per arm")
+if clean.get("paired_benchmark") != hard_name:
+    raise SystemExit("clean context benchmark is not paired with the hard-hint arm")
+if hard.get("paired_benchmark") != clean_name:
+    raise SystemExit("hard-hint context benchmark is not paired with the clean arm")
+if clean.get("sample_ids_sha256") != hard.get("sample_ids_sha256"):
+    raise SystemExit("context test pair sample IDs differ")
+print(clean_name)
+print(hard_name)
+print(clean_count)
+PY
+  )
+  (( ${#context_contract[@]} == 3 )) || die "could not resolve paired context benchmark"
+  CONTEXT_CLEAN_BENCHMARK="${context_contract[0]}"
+  CONTEXT_HARD_BENCHMARK="${context_contract[1]}"
+  CONTEXT_TEST_SAMPLES="${context_contract[2]}"
+  run_benchmark \
+    context-test-clean "${CONTEXT_BENCHMARK_ROOT}" "${CONTEXT_CLEAN_BENCHMARK}" \
+    "${SELECTED_ADAPTER}" "${BENCHMARK_GPU_TOKENS[0]}" "${CONTEXT_TEST_SAMPLES}" &
+  clean_pid=$!
+  run_benchmark \
+    context-test-hard "${CONTEXT_BENCHMARK_ROOT}" "${CONTEXT_HARD_BENCHMARK}" \
+    "${SELECTED_ADAPTER}" "${BENCHMARK_GPU_TOKENS[1]}" "${CONTEXT_TEST_SAMPLES}" &
+  hard_pid=$!
+  context_status=0
+  wait "${clean_pid}" || context_status=$?
+  wait "${hard_pid}" || context_status=$?
+  (( context_status == 0 )) || die "paired context benchmark execution failed"
+  CONTEXT_AUDIT="${OUTPUT_ROOT}/benchmark/context-pair-audit.json"
+  "${PYTHON}" "${REPO}/D2F-eval/audit_context_grounding_pairs.py" \
+    --benchmark-root "${CONTEXT_BENCHMARK_ROOT}" \
+    --clean-benchmark "${CONTEXT_CLEAN_BENCHMARK}" \
+    --hard-benchmark "${CONTEXT_HARD_BENCHMARK}" \
+    --clean-predictions "${OUTPUT_ROOT}/benchmark/context-test-clean" \
+    --hard-predictions "${OUTPUT_ROOT}/benchmark/context-test-hard" \
+    --adapter "${SELECTED_ADAPTER}" \
+    --backbone-sha256 "${PLANNER_SHA256}" \
+    --output "${CONTEXT_AUDIT}"
+  echo "[$(timestamp)] paired context quality gate passed: ${CONTEXT_AUDIT}"
+fi
+
 INDEX="${OUTPUT_ROOT}/benchmark/index.json"
 "${PYTHON}" - "${INDEX}" "${OUTPUT_ROOT}" "${PLANNER_SHA256}" "${MIND2WEB_TEST_NAME}" <<'PY'
 import json
@@ -522,10 +587,16 @@ PY
   --index "${INDEX}" \
   --output "${OUTPUT_ROOT}/benchmark/results.md"
 RELEASE_RECEIPT="${OUTPUT_ROOT}/benchmark/release-receipt.json"
-"${PYTHON}" "${REPO}/D2F-eval/build_residual_release_receipt.py" \
-  --index "${INDEX}" \
-  --selection "${SELECTION}" \
+receipt_args=(
+  --index "${INDEX}"
+  --selection "${SELECTION}"
   --output "${RELEASE_RECEIPT}"
+)
+if [[ -n "${CONTEXT_AUDIT}" ]]; then
+  receipt_args+=(--context-audit "${CONTEXT_AUDIT}")
+fi
+"${PYTHON}" "${REPO}/D2F-eval/build_residual_release_receipt.py" \
+  "${receipt_args[@]}"
 cat "${OUTPUT_ROOT}/benchmark/results.md"
 echo "[$(timestamp)] mobile release receipt=${RELEASE_RECEIPT}"
 echo "[$(timestamp)] residual grounding training and fixed held-out benchmarks completed"

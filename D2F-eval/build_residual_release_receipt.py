@@ -499,7 +499,56 @@ def benchmark_evidence(
     return evidence
 
 
-def build_release_receipt(index_path: Path, selection_path: Path) -> dict[str, Any]:
+def context_audit_evidence(
+    audit_path: Path,
+    *,
+    backbone_sha256: str,
+    selected_adapter: Path,
+    adapter_model_sha256: str,
+) -> dict[str, Any]:
+    audit_path = audit_path.expanduser().resolve()
+    audit = read_json(audit_path, label="context grounding pair audit")
+    if (
+        audit.get("schema_version") != 1
+        or audit.get("format") != "lladao-context-grounding-pair-audit-v1"
+        or audit.get("status") != "passed"
+        or audit.get("release_eligible") is not True
+    ):
+        raise ResidualReleaseReceiptError("context grounding pair audit did not pass")
+    if audit.get("backbone_sha256") != backbone_sha256:
+        raise ResidualReleaseReceiptError("context audit changed the Planner checkpoint")
+    adapter = audit.get("adapter") or {}
+    audit_adapter = resolve_evidence_path(
+        adapter.get("path"), relative_to=audit_path.parent, label="context audit adapter"
+    )
+    if audit_adapter != selected_adapter:
+        raise ResidualReleaseReceiptError("context audit evaluated a non-selected adapter")
+    if adapter.get("adapter_model_sha256") != adapter_model_sha256:
+        raise ResidualReleaseReceiptError("context audit adapter hash does not match selection")
+    checks = audit.get("checks")
+    if not isinstance(checks, dict) or not checks or not all(checks.values()):
+        raise ResidualReleaseReceiptError("context audit quality checks are incomplete")
+    benchmark = audit.get("benchmark") or {}
+    try:
+        samples = int(benchmark.get("samples", -1))
+    except (TypeError, ValueError) as error:
+        raise ResidualReleaseReceiptError("context audit sample count is invalid") from error
+    if not 0 < samples <= 100:
+        raise ResidualReleaseReceiptError("context audit must use 1..100 paired samples")
+    return {
+        "path": str(audit_path),
+        "sha256": sha256_file(audit_path),
+        "samples_per_arm": samples,
+        "thresholds": audit.get("thresholds"),
+        "metrics": audit.get("metrics"),
+    }
+
+
+def build_release_receipt(
+    index_path: Path,
+    selection_path: Path,
+    context_audit_path: Path | None = None,
+) -> dict[str, Any]:
     index_path = index_path.expanduser().resolve()
     selection_path = selection_path.expanduser().resolve()
     index = read_json(index_path, label="benchmark index")
@@ -519,7 +568,7 @@ def build_release_receipt(index_path: Path, selection_path: Path) -> dict[str, A
         selected_adapter=selected_adapter,
         training_contract=training_contract,
     )
-    return {
+    receipt = {
         "schema_version": 1,
         "format": "lladao-residual-grounding-release-v1",
         "status": "benchmark-complete",
@@ -533,6 +582,14 @@ def build_release_receipt(index_path: Path, selection_path: Path) -> dict[str, A
         },
         "benchmarks": benchmarks,
     }
+    if context_audit_path is not None:
+        receipt["context_grounding_pair_audit"] = context_audit_evidence(
+            context_audit_path,
+            backbone_sha256=backbone_sha256,
+            selected_adapter=selected_adapter,
+            adapter_model_sha256=adapter_evidence["adapter_model_sha256"],
+        )
+    return receipt
 
 
 def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
@@ -548,13 +605,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=Path, required=True)
     parser.add_argument("--selection", type=Path, required=True)
+    parser.add_argument("--context-audit", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    receipt = build_release_receipt(args.index, args.selection)
+    receipt = build_release_receipt(args.index, args.selection, args.context_audit)
     output = args.output.expanduser().resolve()
     write_json_atomic(output, receipt)
     print(output)

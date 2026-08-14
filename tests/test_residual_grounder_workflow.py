@@ -51,6 +51,9 @@ def test_launcher_is_one_log_complete_final_planner_and_2_or_8_gpu() -> None:
     assert "sample image is missing" in source
     assert "archived incomplete benchmark output" in source
     assert "run_benchmark_pair" in source
+    assert "MOBILE_CONTEXT_BENCHMARK_ROOT" in source
+    assert "audit_context_grounding_pairs.py" in source
+    assert "context-pair-audit.json" in source
     assert 'CUDA_VISIBLE_DEVICES="${device}"' in source
     assert "BENCHMARK_GPU_TOKENS" in source
     assert "release residual training requires exactly 3 epochs" in source
@@ -62,11 +65,12 @@ def test_launcher_is_one_log_complete_final_planner_and_2_or_8_gpu() -> None:
     assert "export CUDA_VISIBLE_DEVICES" not in source
     assert "2) GRADIENT_ACCUMULATION_STEPS=8" in source
     assert "8) GRADIENT_ACCUMULATION_STEPS=2" in source
-    assert source.count("--limit 100") >= 1
+    assert '--limit "${expected_samples}"' in source
     assert "--require-residual-adapter-contract" in source
     assert "--no-kv-cache-compression" in source
     assert "select_residual_grounder.py" in source
     assert "build_residual_release_receipt.py" in source
+    assert "--context-audit" in source
     assert "release-receipt.json" in source
     assert "Mind2Web validation-100 overlaps Mind2Web test-100" in source
 
